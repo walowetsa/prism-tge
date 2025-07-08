@@ -166,14 +166,7 @@ const MarkdownMessage = ({
             <em className="italic text-gray-700">{children}</em>
           ),
 
-          code: ({ inline, children }) => {
-            if (inline) {
-              return (
-                <code className="px-1.5 py-0.5 bg-gray-100 text-gray-800 rounded text-xs font-mono border">
-                  {children}
-                </code>
-              );
-            }
+          code: ({ children }) => {
             return (
               <pre className="bg-gray-50 border border-gray-200 rounded-md p-3 mb-2 overflow-x-auto">
                 <code className="text-xs font-mono text-gray-800">

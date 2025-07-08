@@ -48,7 +48,7 @@ const CallLogDisplay = ({
   const [activeTranscriptions, setActiveTranscriptions] = useState<string[]>(
     []
   );
-  const maxConcurrentTranscriptions = 0;
+  const maxConcurrentTranscriptions = 5;
 
   // Get unique agents from call logs
   const uniqueAgents = useMemo(() => {

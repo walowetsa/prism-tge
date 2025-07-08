@@ -95,7 +95,7 @@ export async function POST(request: NextRequest) {
       dateRange = { start, end };
     }
 
-    let logs = await getContactLogs(dateRange);
+    let logs = await getContactLogs();
     
     // Enhance with Supabase status if requested
     if (checkSupabase) {

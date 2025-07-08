@@ -41,16 +41,10 @@ export async function getContactLogs(dateRange?: DateRange) {
 }
 
 // Alternative function if you want to keep the original function unchanged
-export async function getContactLogsByDateRange(startDate: Date, endDate: Date) {
+export async function getContactLogsByDateRange() {
   try {
     const result = await pool.query(
-      `SELECT * FROM reporting.contact_log 
-       WHERE agent_username IS NOT NULL 
-       AND recording_location LIKE '%.mp3%' 
-       AND initiation_timestamp >= $1 
-       AND initiation_timestamp <= $2 
-       ORDER BY initiation_timestamp DESC`,
-      [startDate, endDate]
+      `SELECT * FROM reporting.contact_log `
     );
     return result.rows;
   } catch (error) {

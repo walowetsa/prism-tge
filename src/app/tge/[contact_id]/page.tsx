@@ -4,8 +4,8 @@ import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { BiSolidHome } from "react-icons/bi";
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+// import ReactMarkdown from 'react-markdown';
+// import remarkGfm from 'remark-gfm';
 
 // ... (keep all existing interfaces - CallTranscriptionData, ParsedSpeakerData, etc.)
 

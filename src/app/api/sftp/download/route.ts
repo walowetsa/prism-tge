@@ -14,16 +14,18 @@ type SftpConfig = {
   passphrase: string;
 };
 
-// Define the SFTP configuration
-const sftpConfig: SftpConfig = {
-  host: process.env.SFTP_HOST!,
-  port: parseInt(process.env.SFTP_PORT!),
-  username: process.env.SFTP_USERNAME!,
-  privateKey: readFileSync(
-    path.resolve(process.env.HOME || "~", ".ssh/sftp_key")
-  ),
-  passphrase: process.env.SFTP_PASSPHRASE!,
-};
+// Function to get SFTP config (lazy initialization)
+function getSftpConfig(): SftpConfig {
+  return {
+    host: process.env.SFTP_HOST!,
+    port: parseInt(process.env.SFTP_PORT!),
+    username: process.env.SFTP_USERNAME!,
+    privateKey: readFileSync(
+      path.resolve(process.env.HOME || "~", ".ssh/sftp_key")
+    ),
+    passphrase: process.env.SFTP_PASSPHRASE!,
+  };
+}
 
 export async function GET(request: Request) {
   // Get the filename from the query parameters
@@ -38,6 +40,18 @@ export async function GET(request: Request) {
   }
 
   console.log(`SFTP download requested for: ${filename}`);
+
+  // Get SFTP config only when needed (runtime)
+  let sftpConfig: SftpConfig;
+  try {
+    sftpConfig = getSftpConfig();
+  } catch (error) {
+    console.error("Failed to load SFTP configuration:", error);
+    return NextResponse.json(
+      { error: "SFTP configuration error" },
+      { status: 500 }
+    );
+  }
 
   // Create a response stream
   const stream = new TransformStream();

@@ -81,7 +81,7 @@ export async function POST(request: NextRequest) {
 
     // Check if record already exists
     const { data: existingRecord, error: checkError } = await supabase
-      .from('transcriptions') // Replace with your actual table name
+      .from('call_records') // Replace with your actual table name
       .select('contact_id')
       .eq('contact_id', transcriptionData.contact_id)
       .single();
@@ -129,7 +129,7 @@ export async function POST(request: NextRequest) {
       console.log(`Updating existing record for contact_id: ${transcriptionData.contact_id}`);
       
       const { data, error } = await supabase
-        .from('transcriptions')
+        .from('call_records')
         .update(baseData)
         .eq('contact_id', transcriptionData.contact_id)
         .select();
@@ -160,7 +160,7 @@ export async function POST(request: NextRequest) {
       console.log(`Inserting new record for contact_id: ${transcriptionData.contact_id}`);
       
       const { data, error } = await supabase
-        .from('transcriptions') // Replace with your actual table name
+        .from('call_records')
         .insert([{
           contact_id: transcriptionData.contact_id,
           ...baseData
@@ -215,7 +215,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { data, error } = await supabase
-      .from('transcriptions') // Replace with your actual table name
+      .from('call_records') // Replace with your actual table name
       .select('*')
       .eq('contact_id', contactId)
       .single();

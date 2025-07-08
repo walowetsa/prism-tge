@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 // Define the path for storing transcriptions
-const TRANSCRIPTION_DIR = path.join(process.cwd(), 'transcriptions');
+const TRANSCRIPTION_DIR = path.join(process.cwd(), 'call_records');
 
 // Ensure the directory exists
 if (!fs.existsSync(TRANSCRIPTION_DIR)) {

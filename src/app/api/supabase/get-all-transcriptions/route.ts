@@ -112,7 +112,7 @@ export async function GET() {
 
     // Fetch all transcription records with comprehensive field selection
     const { data, error } = await supabase
-      .from('transcriptions')
+      .from('call_records')
       .select(`contact_id, transcript_text, queue_name, agent_username, initiation_timestamp, sentiment_analysis, categories, disposition_title, call_summary, call_duration, primary_category`)
       .order('initiation_timestamp', { ascending: false });
 
@@ -1041,7 +1041,7 @@ export async function POST(request: NextRequest) {
     const { filters, includeAnalytics } = await request.json();
     
     let query = supabase
-      .from('transcriptions')
+      .from('call_records')
       .select('*');
 
     // Apply filters

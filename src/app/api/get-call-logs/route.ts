@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Get the contact logs with optional date filtering
-    let logs = await getContactLogs(dateRange);
+    let logs = await getContactLogs();
     
     // Enhance with Supabase status if requested
     if (checkSupabase) {

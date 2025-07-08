@@ -74,100 +74,100 @@ interface Message {
 }
 
 // Custom Markdown Components for styling
-const MarkdownComponents = {
-  // Headers
-  h1: ({ children }: { children: React.ReactNode }) => (
-    <h1 className="text-xl font-bold mb-3 text-gray-900">{children}</h1>
-  ),
-  h2: ({ children }: { children: React.ReactNode }) => (
-    <h2 className="text-lg font-semibold mb-2 text-gray-900">{children}</h2>
-  ),
-  h3: ({ children }: { children: React.ReactNode }) => (
-    <h3 className="text-md font-medium mb-2 text-gray-900">{children}</h3>
-  ),
+// const MarkdownComponents = {
+//   // Headers
+//   h1: ({ children }: { children: React.ReactNode }) => (
+//     <h1 className="text-xl font-bold mb-3 text-gray-900">{children}</h1>
+//   ),
+//   h2: ({ children }: { children: React.ReactNode }) => (
+//     <h2 className="text-lg font-semibold mb-2 text-gray-900">{children}</h2>
+//   ),
+//   h3: ({ children }: { children: React.ReactNode }) => (
+//     <h3 className="text-md font-medium mb-2 text-gray-900">{children}</h3>
+//   ),
   
-  // Paragraphs
-  p: ({ children }: { children: React.ReactNode }) => (
-    <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>
-  ),
+//   // Paragraphs
+//   p: ({ children }: { children: React.ReactNode }) => (
+//     <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>
+//   ),
   
-  // Lists
-  ul: ({ children }: { children: React.ReactNode }) => (
-    <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>
-  ),
-  ol: ({ children }: { children: React.ReactNode }) => (
-    <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>
-  ),
-  li: ({ children }: { children: React.ReactNode }) => (
-    <li className="ml-2">{children}</li>
-  ),
+//   // Lists
+//   ul: ({ children }: { children: React.ReactNode }) => (
+//     <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>
+//   ),
+//   ol: ({ children }: { children: React.ReactNode }) => (
+//     <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>
+//   ),
+//   li: ({ children }: { children: React.ReactNode }) => (
+//     <li className="ml-2">{children}</li>
+//   ),
   
-  // Emphasis
-  strong: ({ children }: { children: React.ReactNode }) => (
-    <strong className="font-semibold text-gray-900">{children}</strong>
-  ),
-  em: ({ children }: { children: React.ReactNode }) => (
-    <em className="italic text-gray-800">{children}</em>
-  ),
+//   // Emphasis
+//   strong: ({ children }: { children: React.ReactNode }) => (
+//     <strong className="font-semibold text-gray-900">{children}</strong>
+//   ),
+//   em: ({ children }: { children: React.ReactNode }) => (
+//     <em className="italic text-gray-800">{children}</em>
+//   ),
   
-  // Code
-  code: ({ children, className }: { children: React.ReactNode; className?: string }) => {
-    const isInline = !className?.includes('language-');
+//   // Code
+//   code: ({ children, className }: { children: React.ReactNode; className?: string }) => {
+//     const isInline = !className?.includes('language-');
     
-    if (isInline) {
-      return (
-        <code className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-sm font-mono">
-          {children}
-        </code>
-      );
-    }
+//     if (isInline) {
+//       return (
+//         <code className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-sm font-mono">
+//           {children}
+//         </code>
+//       );
+//     }
     
-    return (
-      <pre className="bg-gray-100 text-gray-800 p-3 rounded-lg overflow-x-auto mb-2">
-        <code className="text-sm font-mono">{children}</code>
-      </pre>
-    );
-  },
+//     return (
+//       <pre className="bg-gray-100 text-gray-800 p-3 rounded-lg overflow-x-auto mb-2">
+//         <code className="text-sm font-mono">{children}</code>
+//       </pre>
+//     );
+//   },
   
-  // Blockquotes
-  blockquote: ({ children }: { children: React.ReactNode }) => (
-    <blockquote className="border-l-4 border-gray-300 pl-4 italic text-gray-700 mb-2">
-      {children}
-    </blockquote>
-  ),
+//   // Blockquotes
+//   blockquote: ({ children }: { children: React.ReactNode }) => (
+//     <blockquote className="border-l-4 border-gray-300 pl-4 italic text-gray-700 mb-2">
+//       {children}
+//     </blockquote>
+//   ),
   
-  // Links
-  a: ({ href, children }: { href?: string; children: React.ReactNode }) => (
-    <a 
-      href={href} 
-      className="text-blue-600 hover:text-blue-800 underline"
-      target="_blank"
-      rel="noopener noreferrer"
-    >
-      {children}
-    </a>
-  ),
+//   // Links
+//   a: ({ href, children }: { href?: string; children: React.ReactNode }) => (
+//     <a 
+//       href={href} 
+//       className="text-blue-600 hover:text-blue-800 underline"
+//       target="_blank"
+//       rel="noopener noreferrer"
+//     >
+//       {children}
+//     </a>
+//   ),
   
-  // Tables
-  table: ({ children }: { children: React.ReactNode }) => (
-    <div className="overflow-x-auto mb-2">
-      <table className="min-w-full border border-gray-300 rounded-lg">
-        {children}
-      </table>
-    </div>
-  ),
-  th: ({ children }: { children: React.ReactNode }) => (
-    <th className="border border-gray-300 px-3 py-2 bg-gray-100 font-semibold text-left">
-      {children}
-    </th>
-  ),
-  td: ({ children }: { children: React.ReactNode }) => (
-    <td className="border border-gray-300 px-3 py-2">{children}</td>
-  ),
+//   // Tables
+//   table: ({ children }: { children: React.ReactNode }) => (
+//     <div className="overflow-x-auto mb-2">
+//       <table className="min-w-full border border-gray-300 rounded-lg">
+//         {children}
+//       </table>
+//     </div>
+//   ),
+//   th: ({ children }: { children: React.ReactNode }) => (
+//     <th className="border border-gray-300 px-3 py-2 bg-gray-100 font-semibold text-left">
+//       {children}
+//     </th>
+//   ),
+//   td: ({ children }: { children: React.ReactNode }) => (
+//     <td className="border border-gray-300 px-3 py-2">{children}</td>
+//   ),
   
-  // Horizontal rule
-  hr: () => <hr className="my-4 border-gray-300" />,
-};
+//   // Horizontal rule
+//   hr: () => <hr className="my-4 border-gray-300" />,
+// };
 
 // AI Chat Component with Markdown Rendering
 const AIChat = ({ callData }: { callData: CallTranscriptionData }) => {
@@ -310,12 +310,13 @@ What would you like to know about this call?`,
               {/* Render markdown for assistant messages, plain text for user messages */}
               {message.role === 'assistant' ? (
                 <div className="prose prose-sm max-w-none">
-                  <ReactMarkdown 
+                    {message.content}
+                  {/* <ReactMarkdown 
                     components={MarkdownComponents}
                     remarkPlugins={[remarkGfm]}
                   >
                     {message.content}
-                  </ReactMarkdown>
+                  </ReactMarkdown> */}
                 </div>
               ) : (
                 <div className="whitespace-pre-wrap">{message.content}</div>

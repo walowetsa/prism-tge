@@ -23,22 +23,12 @@ export async function getContactLogs(dateRange?: DateRange) {
       // Use provided date range
       query = `
         SELECT * FROM reporting.contact_log 
-        WHERE agent_username IS NOT NULL 
-        AND recording_location LIKE '%.mp3%' 
-        AND initiation_timestamp >= $1 
-        AND initiation_timestamp <= $2 
-        ORDER BY initiation_timestamp DESC
       `;
       params = [dateRange.start, dateRange.end];
     } else {
       // Fallback to original 7-day query if no date range provided
       query = `
         SELECT * FROM reporting.contact_log 
-        WHERE agent_username IS NOT NULL 
-        AND recording_location LIKE '%.mp3%' 
-        AND initiation_timestamp >= CURRENT_DATE - INTERVAL '7 days' 
-        AND initiation_timestamp <= CURRENT_DATE + INTERVAL '1 day' - INTERVAL '1 second' 
-        ORDER BY initiation_timestamp DESC
       `;
     }
 

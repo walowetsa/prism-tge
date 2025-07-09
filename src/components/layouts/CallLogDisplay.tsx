@@ -58,7 +58,7 @@ const CallLogDisplay = ({
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
   const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 1; // Keep at 2 for server stability
+  const maxConcurrentTranscriptions = 2; // Keep at 2 for server stability
   
   const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
@@ -161,7 +161,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // FIXED: Audio download for call recordings
+  // FIXED: Audio download for call recordings (NO TIMEOUT)
   const handleAudioDownload = async (log: CallLog) => {
     if (!log.recording_location) {
       alert("No audio file available for this call");
@@ -175,16 +175,12 @@ const CallLogDisplay = ({
     setDownloadingAudio(prev => [...prev, contactId]);
 
     try {
-      console.log(`🎵 Downloading call recording for: ${contactId}`);
+      console.log(`🎵 Downloading call recording (NO TIMEOUT): ${contactId}`);
 
       const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
       
-      // FIXED: Realistic timeout for call recordings (3 minutes)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes
-
-      const response = await fetch(downloadUrl, { signal: controller.signal });
-      clearTimeout(timeoutId);
+      // NO TIMEOUT - let download run as long as needed
+      const response = await fetch(downloadUrl);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -216,11 +212,7 @@ const CallLogDisplay = ({
     } catch (error) {
       console.error(`❌ Download error for ${contactId}:`, error);
       
-      if (error instanceof Error && error.name === 'AbortError') {
-        alert('Download timed out after 3 minutes. Call recording may be large or server is slow.');
-      } else {
-        alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+      alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setDownloadingAudio(prev => prev.filter(id => id !== contactId));
     }
@@ -290,7 +282,7 @@ const CallLogDisplay = ({
       const text = await response.text();
       
       if (text.includes('504') || text.includes('Gateway Time-out')) {
-        throw new Error("Request timed out. Call recording processing takes time - please try again.");
+        throw new Error("Server error - may indicate infrastructure timeout (not application timeout).");
       } else if (text.includes('502') || text.includes('Bad Gateway')) {
         throw new Error("Server error. Please try again in a moment.");
       } else {
@@ -299,23 +291,20 @@ const CallLogDisplay = ({
     }
   };
 
-  // FIXED: Transcription for call recordings
+  // FIXED: Transcription for call recordings (NO TIMEOUTS)
   const initiateTranscription = useCallback(async (log: CallLog) => {
     if (!log.recording_location) return false;
 
     const contactId = log.contact_id;
     
-    // FIXED: Realistic timeout for call recordings (8 minutes)
+    // NO TIMEOUT - let transcription run as long as needed
     const controller = new AbortController();
     transcriptionControllers.current.set(contactId, controller);
     
-    const timeoutId = setTimeout(() => {
-      console.log(`⏰ Aborting transcription for ${contactId} - 8 minute timeout`);
-      controller.abort();
-    }, 8 * 60 * 1000);
+    // Only abort if component unmounts (no time-based timeout)
 
     try {
-      console.log(`🚀 Starting transcription for call recording: ${contactId}`);
+      console.log(`🚀 Starting transcription for call recording (NO TIMEOUT): ${contactId}`);
       
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
@@ -337,25 +326,25 @@ const CallLogDisplay = ({
         throw new Error("Could not extract filename");
       }
 
-      console.log(`📁 Processing call recording: ${filename}`);
+      console.log(`📁 Processing call recording (NO TIMEOUT): ${filename}`);
 
-      // FIXED: Realistic progress updates for call recordings
+      // Realistic progress updates for call recordings
       const progressInterval = setInterval(() => {
         setCallLogs((prevLogs) =>
           prevLogs.map((l) => {
             if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
               const currentProgress = l.transcriptionProgress || 0;
-              const newProgress = Math.min(85, currentProgress + 2); // Slower, more realistic progress
+              const newProgress = Math.min(85, currentProgress + 1); // Very slow progress to show it's working
               return { ...l, transcriptionProgress: newProgress };
             }
             return l;
           })
         );
-      }, 5000); // Every 5 seconds
+      }, 10000); // Every 10 seconds
 
       progressIntervals.current.set(contactId, progressInterval);
 
-      // Make transcription request
+      // Make transcription request (NO TIMEOUT)
       const response = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -382,8 +371,6 @@ const CallLogDisplay = ({
         }),
         signal: controller.signal,
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         let errorData;
@@ -424,16 +411,15 @@ const CallLogDisplay = ({
 
       return true;
     } catch (error) {
-      clearTimeout(timeoutId);
       console.error(`💥 Transcription error for ${contactId}:`, error);
 
       let errorMessage = "Unknown error";
       
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          errorMessage = "Transcription timed out after 8 minutes. Call recording may be very large.";
+          errorMessage = "Transcription was cancelled.";
         } else if (error.message.includes('504') || error.message.includes('timeout')) {
-          errorMessage = "Request timed out. Call recording processing takes time - please try again.";
+          errorMessage = "Server processing error. The transcription service may be overloaded.";
         } else {
           errorMessage = error.message;
         }
@@ -689,7 +675,7 @@ const CallLogDisplay = ({
                 )}
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                📞 Processing call recordings - may take several minutes per file
+                📞 Processing call recordings - NO TIME LIMITS (may take 10+ minutes for large files)
               </div>
             </div>
           )}

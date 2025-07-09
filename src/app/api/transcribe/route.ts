@@ -71,10 +71,10 @@ function getServerUrl(): string {
 }
 
 /**
- * FIXED: Realistic download with proper retry logic for call recordings
+ * FIXED: NO TIMEOUTS - download with basic retry logic for call recordings
  */
 async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
-  console.log("🔽 Starting call recording download for:", sftpFilename);
+  console.log("🔽 Starting call recording download (NO TIMEOUTS):", sftpFilename);
   
   const serverUrl = getServerUrl();
   const decodedFilename = decodeURIComponent(sftpFilename);
@@ -82,21 +82,15 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
   
   console.log("📡 Download URL:", downloadUrl);
 
-  // FIXED: Realistic retry configuration for call recordings (not "small files")
-  const maxRetries = 2; // Reduced retries since timeouts are now longer
+  // Simple retry without timeouts
+  const maxRetries = 2;
   const retryDelays = [2000, 5000]; // 2s, 5s
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      console.log(`📥 Download attempt ${attempt + 1}/${maxRetries}`);
+      console.log(`📥 Download attempt ${attempt + 1}/${maxRetries} (NO TIMEOUT)`);
       
-      // FIXED: Realistic timeout for call recordings (2 minutes)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        console.log(`⏰ Download timeout after 2 minutes for attempt ${attempt + 1}`);
-        controller.abort();
-      }, 120000); // 2 minutes for call recordings
-
+      // NO TIMEOUT on fetch
       const response = await fetch(downloadUrl, {
         method: 'GET',
         headers: {
@@ -104,10 +98,8 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
           'Accept': 'audio/*,*/*',
           'Cache-Control': 'no-cache',
         },
-        signal: controller.signal,
+        // NO SIGNAL/TIMEOUT
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`Download failed: ${response.status} - ${response.statusText}`);
@@ -117,10 +109,10 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
       const contentLength = response.headers.get('content-length');
       if (contentLength) {
         const sizeInMB = parseInt(contentLength) / (1024 * 1024);
-        console.log(`📊 Call recording size: ${sizeInMB.toFixed(2)}MB`);
+        console.log(`📊 Call recording size: ${sizeInMB.toFixed(2)}MB (NO TIMEOUT LIMITS)`);
       }
 
-      // Read the response as a blob
+      // Read the response as a blob - NO TIMEOUT
       const audioBlob = await response.blob();
       
       console.log(`✅ Downloaded successfully: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
@@ -130,8 +122,7 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
         throw new Error("Downloaded file is empty");
       }
       
-      // FIXED: More realistic size check for call recordings
-      if (audioBlob.size < 10000) { // Less than 10KB is suspicious for call recordings
+      if (audioBlob.size < 10000) {
         throw new Error(`Downloaded file too small for a call recording: ${audioBlob.size} bytes`);
       }
 
@@ -139,12 +130,6 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
 
     } catch (error) {
       console.error(`❌ Download attempt ${attempt + 1} failed:`, error);
-      
-      // FIXED: Don't retry on AbortError - it means we hit our timeout
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log(`⏰ Timeout reached on attempt ${attempt + 1}, not retrying timeout errors`);
-        throw new Error(`Download timed out after 2 minutes. Call recording may be too large or server is slow.`);
-      }
       
       if (attempt === maxRetries - 1) {
         // Last attempt failed
@@ -162,10 +147,10 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
 }
 
 /**
- * FIXED: Upload to AssemblyAI with realistic timeout
+ * FIXED: Upload to AssemblyAI with NO TIMEOUT
  */
 async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilename?: string): Promise<string> {
-  console.log("⬆️ Uploading to AssemblyAI:", {
+  console.log("⬆️ Uploading to AssemblyAI (NO TIMEOUT):", {
     size: audioBlob.size,
     sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2),
     type: audioBlob.type,
@@ -194,19 +179,7 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
   
   formData.append("file", optimizedBlob, filename);
 
-  // FIXED: Realistic timeout based on file size
-  const sizeInMB = audioBlob.size / (1024 * 1024);
-  const baseTimeout = 60000; // 1 minute base
-  const timeoutPerMB = 30000; // 30 seconds per MB
-  const timeout = baseTimeout + (sizeInMB * timeoutPerMB); // Scale with file size
-  const maxTimeout = 10 * 60 * 1000; // 10 minutes max
-
-  const finalTimeout = Math.min(timeout, maxTimeout);
-
-  console.log(`⏰ Upload timeout set to ${finalTimeout / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), finalTimeout);
+  console.log(`⏰ NO TIMEOUT SET - will wait as long as needed`);
 
   try {
     const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
@@ -215,10 +188,8 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
         Authorization: apiKey,
       },
       body: formData,
-      signal: controller.signal,
+      // NO SIGNAL/TIMEOUT
     });
-
-    clearTimeout(timeoutId);
 
     if (!uploadResponse.ok) {
       const errorData = await uploadResponse.json();
@@ -232,33 +203,27 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
     return uploadData.upload_url;
     
   } catch (error) {
-    clearTimeout(timeoutId);
-    
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Upload timed out after ${finalTimeout / 1000} seconds`);
-    }
-    
     throw error;
   }
 }
 
 /**
- * FIXED: Try direct URL first with realistic timeout, then download approach
+ * FIXED: Try direct URL first with NO TIMEOUT, then download approach
  */
 async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promise<string> {
-  console.log("🎯 Starting optimized audio URL resolution for:", sftpFilename);
+  console.log("🎯 Starting optimized audio URL resolution (NO TIMEOUTS):", sftpFilename);
   
   const serverUrl = getServerUrl();
   const decodedFilename = decodeURIComponent(sftpFilename);
   const directUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(decodedFilename)}`;
   
-  // STEP 1: Quick direct URL test (30 second timeout)
+  // STEP 1: Quick direct URL test (NO TIMEOUT)
   try {
-    console.log("🚀 Testing direct URL approach...");
+    console.log("🚀 Testing direct URL approach (NO TIMEOUT)...");
     
     const headResponse = await fetch(directUrl, { 
       method: 'HEAD',
-      signal: AbortSignal.timeout(30000) // 30 seconds for HEAD request
+      // NO TIMEOUT
     });
     
     if (headResponse.ok) {
@@ -274,8 +239,8 @@ async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promi
     console.log(`❌ Direct URL failed: ${directError instanceof Error ? directError.message : 'Unknown'}`);
   }
   
-  // STEP 2: Download and upload approach
-  console.log("🔄 Using download+upload approach...");
+  // STEP 2: Download and upload approach (NO TIMEOUTS)
+  console.log("🔄 Using download+upload approach (NO TIMEOUTS)...");
   
   const audioBlob = await downloadAudioWithChunking(sftpFilename);
   const uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
@@ -284,7 +249,7 @@ async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promi
 }
 
 /**
- * Topic categorization with appropriate timeout
+ * Topic categorization with NO TIMEOUT
  */
 async function performTopicCategorization(transcriptData: any) {
   try {
@@ -294,7 +259,7 @@ async function performTopicCategorization(transcriptData: any) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: transcriptData }),
-      signal: AbortSignal.timeout(30000), // 30 seconds for categorization
+      // NO TIMEOUT
     });
 
     if (!response.ok) {
@@ -321,8 +286,7 @@ async function performTopicCategorization(transcriptData: any) {
 
 export async function POST(request: Request) {
   const requestStartTime = Date.now();
-  // FIXED: Realistic timeout for call recording transcription - 8 minutes
-  const MAX_REQUEST_TIME = 8 * 60 * 1000; 
+  // REMOVED: NO timeout limits - let it run as long as needed
   
   try {
     const body = await request.json();
@@ -335,7 +299,7 @@ export async function POST(request: Request) {
       callData = null,
     } = body;
 
-    console.log("🎬 CALL RECORDING TRANSCRIPTION START:", {
+    console.log("🎬 CALL RECORDING TRANSCRIPTION START (NO TIMEOUTS):", {
       filename,
       isDirectSftpFile,
       sftpFilename,
@@ -358,9 +322,9 @@ export async function POST(request: Request) {
 
     let uploadUrl: string;
 
-    // PHASE 1: Get audio URL efficiently
+    // PHASE 1: Get audio URL efficiently (NO TIMEOUTS)
     try {
-      console.log("📁 PHASE 1: Audio processing...");
+      console.log("📁 PHASE 1: Audio processing (NO TIMEOUTS)...");
       
       if (isDirectSftpFile && sftpFilename) {
         uploadUrl = await getOptimizedAudioUrl(sftpFilename, apiKey);
@@ -383,8 +347,8 @@ export async function POST(request: Request) {
       }, { status: 500 });
     }
 
-    // PHASE 2: Submit to AssemblyAI
-    console.log("📡 PHASE 2: Submitting to AssemblyAI...");
+    // PHASE 2: Submit to AssemblyAI (NO TIMEOUT)
+    console.log("📡 PHASE 2: Submitting to AssemblyAI (NO TIMEOUT)...");
     
     const transcriptResponse = await fetch("https://api.assemblyai.com/v2/transcript", {
       method: "POST",
@@ -407,7 +371,7 @@ export async function POST(request: Request) {
         punctuate: true,
         format_text: true,
       }),
-      signal: AbortSignal.timeout(20000), // 20 seconds for submission
+      // NO TIMEOUT
     });
 
     if (!transcriptResponse.ok) {
@@ -422,30 +386,22 @@ export async function POST(request: Request) {
     const { id } = await transcriptResponse.json();
     console.log(`✅ Transcription job created: ${id}`);
 
-    // PHASE 3: Poll for results (realistic polling for call recordings)
-    console.log("⏳ PHASE 3: Polling for results...");
+    // PHASE 3: Poll for results (NO TIMEOUT LIMITS)
+    console.log("⏳ PHASE 3: Polling for results (NO TIMEOUT LIMITS)...");
     
     let transcript;
     let status = "processing";
     let attempts = 0;
-    const maxAttempts = 240; // 8 minutes at 2-second intervals
-    const pollInterval = 2000;
+    const pollInterval = 5000; // 5 seconds between polls
 
-    while ((status === "processing" || status === "queued") && attempts < maxAttempts) {
-      const elapsed = Date.now() - requestStartTime;
-      
-      if (elapsed > MAX_REQUEST_TIME - 30000) {
-        console.log("⏰ Approaching timeout, stopping poll");
-        break;
-      }
-
+    while (status === "processing" || status === "queued") {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
       attempts++;
 
       try {
         const statusResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
           headers: { Authorization: apiKey },
-          signal: AbortSignal.timeout(10000),
+          // NO TIMEOUT
         });
 
         if (!statusResponse.ok) {
@@ -456,18 +412,19 @@ export async function POST(request: Request) {
         transcript = await statusResponse.json();
         status = transcript.status;
         
-        // Log progress every 30 attempts (60 seconds)
-        if (attempts % 30 === 0) {
-          console.log(`📊 Status: ${status}, attempt: ${attempts}/${maxAttempts}, elapsed: ${Math.round(elapsed/1000)}s`);
+        // Log progress every 12 attempts (60 seconds)
+        if (attempts % 12 === 0) {
+          const elapsed = Date.now() - requestStartTime;
+          console.log(`📊 Status: ${status}, attempt: ${attempts}, elapsed: ${Math.round(elapsed/1000)}s (NO TIMEOUT LIMITS)`);
         }
         
       } catch (statusError) {
         console.error("Status check error:", statusError);
-        if (attempts >= maxAttempts - 5) break;
+        // Continue polling even on errors
       }
     }
 
-    // PHASE 4: Process results
+    // PHASE 4: Process results (NO TIMEOUT LIMITS)
     if (status === "completed" && transcript) {
       console.log("✅ Transcription completed!");
 
@@ -486,7 +443,7 @@ export async function POST(request: Request) {
         }));
       }
 
-      // Optional topic categorization
+      // Optional topic categorization (NO TIMEOUT)
       let categorization = null;
       if (transcript.utterances && transcript.utterances.length > 0) {
         try {
@@ -517,7 +474,7 @@ export async function POST(request: Request) {
       }
 
       const totalTime = Date.now() - requestStartTime;
-      console.log(`🎉 TRANSCRIPTION COMPLETE in ${Math.round(totalTime/1000)}s`);
+      console.log(`🎉 TRANSCRIPTION COMPLETE in ${Math.round(totalTime/1000)}s (NO TIMEOUT LIMITS)`);
 
       return NextResponse.json({
         ...transcript,
@@ -533,12 +490,16 @@ export async function POST(request: Request) {
       }, { status: 500 });
       
     } else {
-      console.error("⏰ Transcription timed out");
+      // This should only happen if AssemblyAI never responds or has issues
+      const totalTime = Date.now() - requestStartTime;
+      console.error(`⚠️ Transcription incomplete after ${Math.round(totalTime/1000)}s, final status: ${status}`);
+      
       return NextResponse.json({
-        error: "Transcription timed out. Call recording processing may take longer than expected.",
-        status: "timeout",
+        error: "Transcription did not complete. This may indicate an issue with AssemblyAI service.",
+        status: status || "unknown",
         transcription_id: id,
-      }, { status: 504 });
+        elapsed_time: Math.round(totalTime/1000),
+      }, { status: 500 });
     }
 
   } catch (error) {

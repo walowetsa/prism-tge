@@ -93,7 +93,7 @@ async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
   try {
     const response = await fetch(publicUrl, { 
       method: 'HEAD', // Just check if file exists without downloading
-      signal: AbortSignal.timeout(10000) // 10 second timeout for HEAD request
+      signal: AbortSignal.timeout(100000) // 10 second timeout for HEAD request
     });
     
     if (!response.ok) {
@@ -139,7 +139,7 @@ async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob>
   try {
     // Increase timeout to 2 minutes for large files
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+    const timeoutId = setTimeout(() => controller.abort(), 240000); // 2 minutes
 
     const response = await fetch(downloadUrl, {
       method: 'GET',
@@ -225,7 +225,7 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
 
   // Set timeout based on file size (minimum 60 seconds, max 5 minutes)
   const sizeInMB = audioBlob.size / (1024 * 1024);
-  const timeoutMs = Math.max(60000, Math.min(300000, sizeInMB * 5000)); // 5 seconds per MB
+  const timeoutMs = Math.max(60000, Math.min(300000, sizeInMB * 50000)); // 5 seconds per MB
   
   console.log(`Upload timeout set to ${timeoutMs / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
 

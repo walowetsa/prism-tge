@@ -71,27 +71,63 @@ async function saveToSupabase(
 }
 
 /**
- * Simplified function to get audio from SFTP using HTTP endpoint
- * Optimized for Linux server environment
+ * Get a public URL for SFTP file that AssemblyAI can access directly
+ * This avoids downloading and re-uploading large files
  */
-async function getAudioFromSFTP(sftpFilename: string): Promise<Blob> {
-  console.log("Fetching SFTP file:", sftpFilename);
+async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
+  console.log("Creating public URL for SFTP file:", sftpFilename);
 
-  // Determine the correct internal URL for server-to-server communication
+  // Determine the public URL that AssemblyAI can access
+  const getPublicUrl = () => {
+    // Use network IP for external access
+    const networkUrl = process.env.NETWORK_URL || 'http://192.168.40.101:3000';
+    const publicUrl = process.env.NEXT_PUBLIC_SERVER_URL || networkUrl;
+    
+    return `${publicUrl}/api/sftp/download?filename=${encodeURIComponent(sftpFilename)}`;
+  };
+
+  const publicUrl = getPublicUrl();
+  console.log("Public audio URL:", publicUrl);
+
+  // Verify the file is accessible before returning the URL
+  try {
+    const response = await fetch(publicUrl, { 
+      method: 'HEAD', // Just check if file exists without downloading
+      signal: AbortSignal.timeout(10000) // 10 second timeout for HEAD request
+    });
+    
+    if (!response.ok) {
+      throw new Error(`File not accessible: ${response.status}`);
+    }
+
+    const contentLength = response.headers.get('content-length');
+    if (contentLength) {
+      const sizeInMB = parseInt(contentLength) / (1024 * 1024);
+      console.log(`Audio file verified: ${sizeInMB.toFixed(2)}MB`);
+    }
+
+    return publicUrl;
+  } catch (error) {
+    console.error("Failed to verify public URL:", error);
+    throw new Error(`Audio file not accessible at public URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Fallback function to download and upload for files that can't be accessed directly
+ * With increased timeout and better error handling
+ */
+async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob> {
+  console.log("Downloading SFTP file as fallback:", sftpFilename);
+
   const getInternalUrl = () => {
-    // For production Linux server, try multiple approaches
     const possibleUrls = [
-      // Try localhost first (best for internal server calls)
       `http://localhost:${process.env.PORT || 3000}`,
-      // Fallback to 127.0.0.1
       `http://127.0.0.1:${process.env.PORT || 3000}`,
-      // If environment variables are set
       process.env.NEXTAUTH_URL,
       process.env.NEXT_PUBLIC_SERVER_URL,
-      // Network IP as last resort (though usually not needed for internal calls)
       process.env.NETWORK_URL || 'http://192.168.40.101:3000'
     ].filter(Boolean);
-
     return possibleUrls[0];
   };
 
@@ -101,16 +137,21 @@ async function getAudioFromSFTP(sftpFilename: string): Promise<Blob> {
   console.log("Internal download URL:", downloadUrl);
 
   try {
+    // Increase timeout to 2 minutes for large files
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+
     const response = await fetch(downloadUrl, {
       method: 'GET',
       headers: {
         'User-Agent': 'TranscriptionService/1.0',
-        'Host': 'localhost', // Help with internal routing
-        'Connection': 'close', // Prevent keep-alive issues
+        'Host': 'localhost',
+        'Connection': 'close',
       },
-      // Add timeout to prevent hanging
-      signal: AbortSignal.timeout(30000), // 30 seconds
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
     
     if (!response.ok) {
       const errorText = await response.text();
@@ -123,15 +164,25 @@ async function getAudioFromSFTP(sftpFilename: string): Promise<Blob> {
       throw new Error(`SFTP download failed: ${response.status} - ${response.statusText}`);
     }
 
+    // Check content length before downloading
+    const contentLength = response.headers.get('content-length');
+    if (contentLength) {
+      const sizeInMB = parseInt(contentLength) / (1024 * 1024);
+      console.log(`Downloading file: ${sizeInMB.toFixed(2)}MB`);
+      
+      if (sizeInMB > 500) {
+        throw new Error(`File too large: ${sizeInMB.toFixed(2)}MB (max: 500MB)`);
+      }
+    }
+
     const audioBlob = await response.blob();
     
-    console.log("Successfully retrieved audio blob:", {
+    console.log("Successfully downloaded audio blob:", {
       size: audioBlob.size,
       type: audioBlob.type,
       sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2)
     });
 
-    // Basic validation
     if (audioBlob.size === 0) {
       throw new Error("Audio file is empty");
     }
@@ -140,20 +191,13 @@ async function getAudioFromSFTP(sftpFilename: string): Promise<Blob> {
       throw new Error(`Audio file too small: ${audioBlob.size} bytes`);
     }
 
-    // Check for reasonable file size (max 500MB)
-    const maxSizeMB = 500;
-    if (audioBlob.size > maxSizeMB * 1024 * 1024) {
-      throw new Error(`Audio file too large: ${(audioBlob.size / (1024 * 1024)).toFixed(2)}MB (max: ${maxSizeMB}MB)`);
-    }
-
     return audioBlob;
 
   } catch (error) {
-    console.error("Error fetching SFTP file:", error);
+    console.error("Error downloading SFTP file:", error);
     
-    // Provide more helpful error context
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error("SFTP download timed out - file might be too large or server is busy");
+      throw new Error("SFTP download timed out after 2 minutes - file might be too large or connection is slow");
     }
     
     throw new Error(`Failed to download audio file: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -161,7 +205,7 @@ async function getAudioFromSFTP(sftpFilename: string): Promise<Blob> {
 }
 
 /**
- * Simplified function to upload audio to AssemblyAI
+ * Simplified function to upload audio to AssemblyAI with better timeout handling
  */
 async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilename?: string): Promise<string> {
   console.log("Uploading audio to AssemblyAI:", {
@@ -179,23 +223,45 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
   // Append the blob directly without modification
   formData.append("file", audioBlob, filename);
 
-  const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
-    method: "POST",
-    headers: {
-      Authorization: apiKey,
-    },
-    body: formData,
-  });
+  // Set timeout based on file size (minimum 60 seconds, max 5 minutes)
+  const sizeInMB = audioBlob.size / (1024 * 1024);
+  const timeoutMs = Math.max(60000, Math.min(300000, sizeInMB * 5000)); // 5 seconds per MB
+  
+  console.log(`Upload timeout set to ${timeoutMs / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
 
-  if (!uploadResponse.ok) {
-    const errorData = await uploadResponse.json();
-    console.error("AssemblyAI upload error:", errorData);
-    throw new Error(`Failed to upload to AssemblyAI: ${uploadResponse.status} - ${JSON.stringify(errorData)}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+      },
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!uploadResponse.ok) {
+      const errorData = await uploadResponse.json();
+      console.error("AssemblyAI upload error:", errorData);
+      throw new Error(`Failed to upload to AssemblyAI: ${uploadResponse.status} - ${JSON.stringify(errorData)}`);
+    }
+
+    const uploadData = await uploadResponse.json();
+    console.log("Upload successful. Upload URL:", uploadData.upload_url);
+    return uploadData.upload_url;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Upload to AssemblyAI timed out after ${timeoutMs / 1000} seconds`);
+    }
+    
+    throw error;
   }
-
-  const uploadData = await uploadResponse.json();
-  console.log("Upload successful. Upload URL:", uploadData.upload_url);
-  return uploadData.upload_url;
 }
 
 /**
@@ -287,11 +353,18 @@ export async function POST(request: Request) {
       if (isDirectSftpFile && sftpFilename) {
         console.log("Processing SFTP file:", sftpFilename);
         
-        // Get audio blob from SFTP
-        const audioBlob = await getAudioFromSFTP(sftpFilename);
-        
-        // Upload directly to AssemblyAI
-        uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
+        // Try direct URL approach first (much faster for large files)
+        try {
+          console.log("Attempting direct URL approach...");
+          uploadUrl = await getPublicAudioUrl(sftpFilename);
+          console.log("Using direct URL approach successfully");
+        } catch (directUrlError) {
+          console.log("Direct URL failed, falling back to download+upload:", directUrlError);
+          
+          // Fallback to download and upload
+          const audioBlob = await getAudioFromSFTPWithFallback(sftpFilename);
+          uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
+        }
         
       } else if (audioUrl) {
         console.log("Processing audio URL:", audioUrl);
@@ -317,9 +390,23 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error("Error processing audio:", error);
       
+      // Provide specific error messages based on the type of error
+      let errorMessage = "Failed to process audio file";
+      if (error instanceof Error) {
+        if (error.message.includes("timed out")) {
+          errorMessage = "Audio download timed out - file might be too large or connection is slow";
+        } else if (error.message.includes("too large")) {
+          errorMessage = "Audio file is too large for processing";
+        } else if (error.message.includes("not accessible")) {
+          errorMessage = "Audio file is not accessible from the server";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
       return NextResponse.json(
         { 
-          error: "Failed to process audio file",
+          error: errorMessage,
           details: error instanceof Error ? error.message : "Unknown error",
           stage: "audio_processing"
         },

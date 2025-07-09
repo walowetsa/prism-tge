@@ -121,9 +121,40 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string) {
   console.log("⬆️ Uploading to AssemblyAI...");
   console.log(`📁 Upload blob size: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
 
+  // Validate audio blob
+  if (audioBlob.size === 0) {
+    throw new Error("Audio blob is empty");
+  }
+
+  if (audioBlob.size < 1000) {
+    console.warn("⚠️ Audio blob is very small, might be corrupted");
+  }
+
+  // Check if blob looks like a WAV file
   try {
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    if (uint8Array.length >= 12) {
+      const riffHeader = Array.from(uint8Array.slice(0, 4)).map(b => String.fromCharCode(b)).join('');
+      const waveHeader = Array.from(uint8Array.slice(8, 12)).map(b => String.fromCharCode(b)).join('');
+      
+      console.log(`🔍 Audio headers - RIFF: "${riffHeader}", WAVE: "${waveHeader}"`);
+      
+      if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
+        console.log("✅ Valid WAV file header detected");
+      } else {
+        console.warn("⚠️ Audio file doesn't have expected WAV headers");
+        console.log(`🔍 First 16 bytes: ${Array.from(uint8Array.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+      }
+    }
+    
+    // Recreate blob to ensure proper MIME type
+    const wavBlob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    console.log(`🎵 Created WAV blob: ${wavBlob.size} bytes, type: ${wavBlob.type}`);
+    
     const uploadFormData = new FormData();
-    uploadFormData.append("file", audioBlob, "audio.wav");
+    uploadFormData.append("file", wavBlob, "audio.wav");
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for upload
@@ -140,10 +171,19 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string) {
     clearTimeout(timeoutId);
 
     console.log(`⬆️ AssemblyAI Upload Status: ${uploadResponse.status}`);
+    console.log(`📋 AssemblyAI Response Headers:`, Object.fromEntries(uploadResponse.headers.entries()));
 
     if (!uploadResponse.ok) {
-      const errorData = await uploadResponse.json();
-      console.error("❌ AssemblyAI upload error:", errorData);
+      const errorText = await uploadResponse.text();
+      console.error("❌ AssemblyAI upload error response:", errorText);
+      
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { error: errorText };
+      }
+      
       throw new Error(`AssemblyAI upload failed: ${uploadResponse.status} - ${JSON.stringify(errorData)}`);
     }
 

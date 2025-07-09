@@ -99,7 +99,6 @@ function constructSftpPath(filename: string): string[] {
 }
 
 export async function GET(request: Request) {
-  // Get the filename from the query parameters
   const url = new URL(request.url);
   const filename = url.searchParams.get("filename");
 
@@ -110,123 +109,178 @@ export async function GET(request: Request) {
     );
   }
 
-  console.log(`SFTP download requested for: ${filename}`);
+  console.log(`🎵 SFTP audio download requested for: ${filename}`);
 
-  // Get SFTP config only when needed (runtime)
+  // Get SFTP config
   let sftpConfig: SftpConfig;
   try {
     sftpConfig = getSftpConfig();
   } catch (error) {
-    console.error("Failed to load SFTP configuration:", error);
+    console.error("❌ Failed to load SFTP configuration:", error);
     return NextResponse.json(
       { error: "SFTP configuration error" },
       { status: 500 }
     );
   }
 
-  // Create a response stream
-  const stream = new TransformStream();
-  const writer = stream.writable.getWriter();
+  return new Promise<NextResponse>((resolve, reject) => {
+    const conn = new Client();
+    let resolved = false;
 
-  const conn = new Client();
-
-  // Add a timeout to prevent hanging requests
-  const connectionTimeout = setTimeout(() => {
-    console.error("SFTP connection timeout");
-    conn.end();
-    writer.close();
-  }, 30000); // 30 second timeout
-
-  // Connect to the SFTP server
-  conn.on("ready", () => {
-    console.log("SFTP connection ready for download.");
-    clearTimeout(connectionTimeout);
-
-    conn.sftp((err, sftp) => {
-      if (err) {
-        console.error("SFTP session error:", err);
-        writer.close();
-        return;
+    // Connection timeout
+    const connectionTimeout = setTimeout(() => {
+      if (!resolved) {
+        console.error("⏰ SFTP connection timeout");
+        resolved = true;
+        conn.end();
+        reject(NextResponse.json({ error: "Connection timeout" }, { status: 504 }));
       }
+    }, 30000);
 
-      // Get all possible paths for the file
-      const possiblePaths = constructSftpPath(filename);
-      console.log(`Trying ${possiblePaths.length} possible paths for file: ${filename}`);
-      
-      let pathIndex = 0;
-      let fileFound = false;
-      
-      const tryNextPath = () => {
-        if (pathIndex >= possiblePaths.length) {
-          console.error(`File not found in any of the ${possiblePaths.length} attempted paths`);
-          writer.close();
-          conn.end();
+    conn.on("ready", () => {
+      console.log("✅ SFTP connection ready for audio download");
+      clearTimeout(connectionTimeout);
+
+      conn.sftp((err, sftp) => {
+        if (err) {
+          console.error("❌ SFTP session error:", err);
+          if (!resolved) {
+            resolved = true;
+            reject(NextResponse.json({ error: "SFTP session error" }, { status: 500 }));
+          }
           return;
         }
-        
-        const currentPath = possiblePaths[pathIndex];
-        console.log(`Attempting path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
-        
-        // Create a read stream for the file
-        const readStream = sftp.createReadStream(currentPath);
 
-        // Handle potential errors on the read stream
-        readStream.on("error", (readErr: Error) => {
-          console.log(`Path ${pathIndex + 1} failed: ${readErr.message}`);
-          pathIndex++;
-          tryNextPath();
-        });
-
-        // Process the data in chunks
-        readStream.on("data", async (chunk: Buffer) => {
-          if (!fileFound) {
-            fileFound = true;
-            console.log(`✅ File found at path: ${currentPath}`);
+        const possiblePaths = constructSftpPath(filename);
+        console.log(`🔍 Trying ${possiblePaths.length} possible paths for audio file`);
+        
+        let pathIndex = 0;
+        let fileFound = false;
+        
+        const tryNextPath = () => {
+          if (pathIndex >= possiblePaths.length) {
+            console.error(`❌ Audio file not found in any of the ${possiblePaths.length} attempted paths`);
+            if (!resolved) {
+              resolved = true;
+              reject(NextResponse.json({ error: "Audio file not found" }, { status: 404 }));
+            }
+            conn.end();
+            return;
           }
           
-          try {
-            await writer.write(chunk);
-            console.log(`Read ${chunk.length} bytes from SFTP file`);
-          } catch (e) {
-            console.error("Error writing chunk:", e);
-            conn.end();
-          }
-        });
+          const currentPath = possiblePaths[pathIndex];
+          console.log(`🔍 Attempting audio path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
+          
+          // First check if file exists and get its stats
+          sftp.stat(currentPath, (statErr, stats) => {
+            if (statErr) {
+              console.log(`❌ Path ${pathIndex + 1} stat failed: ${statErr.message}`);
+              pathIndex++;
+              tryNextPath();
+              return;
+            }
 
-        readStream.on("end", async () => {
-          console.log(`✅ Finished reading SFTP file from: ${currentPath}`);
-          await writer.close();
-          conn.end();
-        });
-      };
-      
-      // Start trying paths
-      tryNextPath();
+            console.log(`📊 File stats - Size: ${stats.size} bytes, Mode: ${stats.mode}`);
+            
+            if (stats.size === 0) {
+              console.log(`⚠️ File at path ${pathIndex + 1} is empty, trying next path`);
+              pathIndex++;
+              tryNextPath();
+              return;
+            }
+
+            // File exists and has content, now download it
+            const fileBuffer: Buffer[] = [];
+            const readStream = sftp.createReadStream(currentPath);
+
+            readStream.on("error", (readErr: Error) => {
+              console.log(`❌ Read stream error for path ${pathIndex + 1}: ${readErr.message}`);
+              pathIndex++;
+              tryNextPath();
+            });
+
+            readStream.on("data", (chunk: Buffer) => {
+              if (!fileFound) {
+                fileFound = true;
+                console.log(`✅ Audio file found and downloading from: ${currentPath}`);
+              }
+              fileBuffer.push(chunk);
+              console.log(`📦 Downloaded chunk: ${chunk.length} bytes (total: ${Buffer.concat(fileBuffer).length} bytes)`);
+            });
+
+            readStream.on("end", () => {
+              const audioBuffer = Buffer.concat(fileBuffer);
+              console.log(`✅ Audio download complete: ${audioBuffer.length} bytes from ${currentPath}`);
+              
+              if (audioBuffer.length === 0) {
+                console.error("❌ Downloaded audio buffer is empty");
+                if (!resolved) {
+                  resolved = true;
+                  reject(NextResponse.json({ error: "Downloaded audio file is empty" }, { status: 500 }));
+                }
+                conn.end();
+                return;
+              }
+
+              // Validate that this looks like a WAV file
+              const isWavFile = audioBuffer.length >= 12 && 
+                              audioBuffer.subarray(0, 4).toString() === 'RIFF' &&
+                              audioBuffer.subarray(8, 12).toString() === 'WAVE';
+              
+              if (!isWavFile) {
+                console.warn("⚠️ File doesn't appear to be a WAV file based on header check");
+                console.log(`🔍 File header: ${audioBuffer.subarray(0, 16).toString('hex')}`);
+              } else {
+                console.log("✅ WAV file header validation passed");
+              }
+
+              // Extract just the filename for the download header
+              const downloadFilename = filename.split('/').pop() || filename;
+              
+              if (!resolved) {
+                resolved = true;
+                // Return the audio file with proper headers for WAV
+                resolve(
+                  new NextResponse(audioBuffer, {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "audio/wav",
+                      "Content-Length": audioBuffer.length.toString(),
+                      "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+                      "Cache-Control": "no-cache",
+                    },
+                  })
+                );
+              }
+              
+              conn.end();
+            });
+          });
+        };
+        
+        // Start trying paths
+        tryNextPath();
+      });
     });
-  });
 
-  conn.on("error", (err) => {
-    console.error("Connection error:", err);
-    clearTimeout(connectionTimeout);
-    writer.close();
-  });
+    conn.on("error", (err) => {
+      console.error("❌ SFTP connection error:", err);
+      clearTimeout(connectionTimeout);
+      if (!resolved) {
+        resolved = true;
+        reject(NextResponse.json({ error: "SFTP connection error" }, { status: 500 }));
+      }
+    });
 
-  // Establish the connection
-  try {
-    conn.connect(sftpConfig);
-  } catch (e) {
-    console.error("SFTP connection error:", e);
-    writer.close();
-  }
-
-  // Extract just the filename for the download header
-  const downloadFilename = filename.split('/').pop() || filename;
-  
-  // Return the response with appropriate headers for WAV files
-  return new NextResponse(stream.readable, {
-    headers: {
-      "Content-Disposition": `attachment; filename="${downloadFilename}"`,
-      "Content-Type": "audio/wav",
-    },
+    // Establish the connection
+    try {
+      conn.connect(sftpConfig);
+    } catch (e) {
+      console.error("❌ SFTP connection initiation error:", e);
+      if (!resolved) {
+        resolved = true;
+        reject(NextResponse.json({ error: "Failed to initiate SFTP connection" }, { status: 500 }));
+      }
+    }
   });
 }

@@ -48,26 +48,18 @@ const CallLogDisplay = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  // Agent filter state
   const [selectedAgent, setSelectedAgent] = useState<string>("all");
-  
-  // Sorting state
   const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-
-  // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-
-  // Audio download state
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // Improved transcription state management
+  // OPTIMIZED: Transcription state for small files
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
   const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 1;
+  const maxConcurrentTranscriptions = 2; // Increased to 2 for small files
   
-  // Use refs to track progress intervals and prevent memory leaks
   const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
 
@@ -83,12 +75,10 @@ const CallLogDisplay = ({
   const filteredAndSortedCallLogs = useMemo(() => {
     let filtered = callLogs;
     
-    // Apply agent filter
     if (selectedAgent !== "all") {
       filtered = callLogs.filter(log => log.agent_username === selectedAgent);
     }
     
-    // Apply sorting
     return filtered.sort((a, b) => {
       let aValue: any, bValue: any;
       
@@ -133,21 +123,18 @@ const CallLogDisplay = ({
 
   // Cleanup function for transcription resources
   const cleanupTranscription = useCallback((contactId: string) => {
-    // Clear progress interval
     const interval = progressIntervals.current.get(contactId);
     if (interval) {
       clearInterval(interval);
       progressIntervals.current.delete(contactId);
     }
     
-    // Abort any ongoing request
     const controller = transcriptionControllers.current.get(contactId);
     if (controller) {
       controller.abort();
       transcriptionControllers.current.delete(contactId);
     }
     
-    // Remove from active transcriptions
     setActiveTranscriptions(prev => {
       const newSet = new Set(prev);
       newSet.delete(contactId);
@@ -158,7 +145,6 @@ const CallLogDisplay = ({
   // Cleanup all transcriptions on unmount
   useEffect(() => {
     return () => {
-      // Cleanup all intervals and controllers
       progressIntervals.current.forEach(interval => clearInterval(interval));
       transcriptionControllers.current.forEach(controller => controller.abort());
       progressIntervals.current.clear();
@@ -166,7 +152,6 @@ const CallLogDisplay = ({
     };
   }, []);
 
-  // Handle sorting
   const handleSort = (field: SortField) => {
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -176,7 +161,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // Handle audio download
+  // OPTIMIZED: Audio download for small files
   const handleAudioDownload = async (log: CallLog) => {
     if (!log.recording_location) {
       alert("No audio file available for this call");
@@ -185,34 +170,29 @@ const CallLogDisplay = ({
 
     const contactId = log.contact_id;
     
-    // Check if already downloading
-    if (downloadingAudio.includes(contactId)) {
-      return;
-    }
+    if (downloadingAudio.includes(contactId)) return;
 
-    // Add to downloading state
     setDownloadingAudio(prev => [...prev, contactId]);
 
     try {
-      console.log(`🎵 Starting audio download for call ${contactId}`);
-      console.log(`📁 Recording location: ${log.recording_location}`);
+      console.log(`🎵 Downloading small audio file for: ${contactId}`);
 
-      // Use the SFTP download endpoint
       const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
       
-      console.log(`🌐 Download URL: ${downloadUrl}`);
+      // Shorter timeout for small files
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 1 minute
 
-      const response = await fetch(downloadUrl);
+      const response = await fetch(downloadUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ Download failed: ${response.status} - ${errorText}`);
         throw new Error(`Download failed: ${response.status} - ${errorText}`);
       }
 
-      // Get the blob
       const blob = await response.blob();
-      console.log(`📦 Downloaded blob: ${blob.size} bytes, type: ${blob.type}`);
+      console.log(`📦 Downloaded: ${blob.size} bytes, type: ${blob.type}`);
 
       if (blob.size === 0) {
         throw new Error("Downloaded file is empty");
@@ -223,42 +203,40 @@ const CallLogDisplay = ({
       const a = document.createElement('a');
       a.style.display = 'none';
       a.href = url;
+      a.download = log.recording_location.split('/').pop() || `call_${contactId}.wav`;
       
-      // Extract filename from recording location
-      const filename = log.recording_location.split('/').pop() || `call_${contactId}.wav`;
-      a.download = filename;
-      
-      // Trigger download
       document.body.appendChild(a);
       a.click();
       
-      // Cleanup
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
       
-      console.log(`✅ Audio download completed for call ${contactId}`);
+      console.log(`✅ Download completed for: ${contactId}`);
 
     } catch (error) {
-      console.error(`❌ Error downloading audio for call ${contactId}:`, error);
-      alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error(`❌ Download error for ${contactId}:`, error);
+      
+      if (error instanceof Error && error.name === 'AbortError') {
+        alert('Download timed out. Please try again.');
+      } else {
+        alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
     } finally {
-      // Remove from downloading state
       setDownloadingAudio(prev => prev.filter(id => id !== contactId));
     }
   };
 
-  // Reset agent filter and pagination when new data is loaded
+  // Reset filters when data changes
   useEffect(() => {
     setSelectedAgent("all");
     setCurrentPage(1);
   }, [selectedDateRange]);
 
-  // Reset pagination when filters change
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedAgent, sortField, sortDirection]);
 
-  // Function to get transcription status component with better error handling
+  // Get transcription status
   const getTranscriptionStatus = (log: CallLog) => {
     if (checkSupabase && log.existsInSupabase) {
       return (
@@ -271,7 +249,7 @@ const CallLogDisplay = ({
       return (
         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
           <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
-          In Progress
+          Processing
           {log.transcriptionProgress && (
             <span className="ml-1">({log.transcriptionProgress}%)</span>
           )}
@@ -297,7 +275,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // IMPROVED: Helper function to safely parse API responses
+  // Helper to safely parse API responses
   const parseApiResponse = async (response: Response) => {
     const contentType = response.headers.get('content-type');
     
@@ -305,47 +283,40 @@ const CallLogDisplay = ({
       try {
         return await response.json();
       } catch (jsonError) {
-        console.error("Failed to parse JSON response:", jsonError);
         const text = await response.text();
         throw new Error(`Invalid JSON response: ${text.substring(0, 200)}...`);
       }
     } else {
-      // Response is not JSON (likely HTML error page)
       const text = await response.text();
-      console.error("Non-JSON response received:", text.substring(0, 500));
       
-      // Extract error message from HTML if possible
       if (text.includes('504') || text.includes('Gateway Time-out')) {
-        throw new Error("Request timed out (504 Gateway Timeout). The file might be too large or the server is overloaded.");
+        throw new Error("Request timed out. Small files should process quickly - please try again.");
       } else if (text.includes('502') || text.includes('Bad Gateway')) {
-        throw new Error("Server error (502 Bad Gateway). Please try again in a few moments.");
-      } else if (text.includes('500') || text.includes('Internal Server Error')) {
-        throw new Error("Internal server error (500). Please try again later.");
+        throw new Error("Server error. Please try again in a moment.");
       } else {
-        throw new Error(`Server returned HTML instead of JSON. Status: ${response.status}`);
+        throw new Error(`Server error. Status: ${response.status}`);
       }
     }
   };
 
+  // OPTIMIZED: Transcription for small files
   const initiateTranscription = useCallback(async (log: CallLog) => {
     if (!log.recording_location) return false;
 
     const contactId = log.contact_id;
     
-    // Create abort controller for this transcription with increased timeout
+    // OPTIMIZED: Shorter timeout for small files (4 minutes)
     const controller = new AbortController();
     transcriptionControllers.current.set(contactId, controller);
     
-    // Set timeout for 5 minutes (300 seconds)
     const timeoutId = setTimeout(() => {
-      console.log(`Aborting transcription for ${contactId} due to timeout`);
+      console.log(`⏰ Aborting transcription for ${contactId} - 4 minute timeout`);
       controller.abort();
-    }, 300000); // 5 minutes
+    }, 4 * 60 * 1000);
 
     try {
-      console.log(`Starting transcription for ${contactId}`);
+      console.log(`🚀 Starting transcription for small file: ${contactId}`);
       
-      // Update log status to pending
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
           l.contact_id === contactId
@@ -359,44 +330,35 @@ const CallLogDisplay = ({
         )
       );
 
-      // Validate recording location format
       const fullPath = log.recording_location;
-      if (!fullPath || typeof fullPath !== 'string') {
-        throw new Error("Invalid recording location");
-      }
-
       const filename = fullPath.split("/").pop();
+      
       if (!filename) {
-        throw new Error("Could not extract filename from recording location");
+        throw new Error("Could not extract filename");
       }
 
-      console.log(`Processing file: ${filename} from path: ${fullPath}`);
+      console.log(`📁 Processing small file: ${filename}`);
 
-      // Set up progress updates with proper cleanup
+      // OPTIMIZED: Faster progress updates for small files
       const progressInterval = setInterval(() => {
         setCallLogs((prevLogs) =>
           prevLogs.map((l) => {
-            if (
-              l.contact_id === contactId &&
-              l.transcriptionStatus === "Pending Transcription"
-            ) {
+            if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
               const currentProgress = l.transcriptionProgress || 0;
-              const newProgress = Math.min(85, currentProgress + 2);
+              const newProgress = Math.min(90, currentProgress + 3); // Faster progress
               return { ...l, transcriptionProgress: newProgress };
             }
             return l;
           })
         );
-      }, 3000); // Increased from 2s to 3s to reduce update frequency
+      }, 2000); // Every 2 seconds
 
       progressIntervals.current.set(contactId, progressInterval);
 
-      // Make the transcription request
+      // Make transcription request
       const response = await fetch("/api/transcribe", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           isDirectSftpFile: true,
           sftpFilename: fullPath,
@@ -423,36 +385,29 @@ const CallLogDisplay = ({
 
       clearTimeout(timeoutId);
 
-      // IMPROVED: Use the new parseApiResponse function
       if (!response.ok) {
         let errorData;
         try {
           errorData = await parseApiResponse(response);
         } catch (parseError) {
-          console.error("Failed to parse error response:", parseError);
           throw new Error(`HTTP ${response.status}: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
         }
         
-        console.error("Transcription failed:", errorData);
         throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
       }
 
       const transcriptionData = await parseApiResponse(response);
-      console.log(`Transcription API response for ${contactId}:`, transcriptionData);
-
-      // Check if transcription was actually successful
+      
       const hasValidTranscript = transcriptionData && 
         transcriptionData.status === "completed" &&
         transcriptionData.text && 
         transcriptionData.text.trim().length > 0;
 
-      if (!hasValidTranscript) {
-        console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
-      }
+      console.log(`✅ Transcription completed for ${contactId}:`, {
+        status: transcriptionData.status,
+        hasText: hasValidTranscript
+      });
 
-      console.log(`Transcription completed for ${contactId}`);
-
-      // Update log status to transcribed
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
           l.contact_id === contactId
@@ -470,13 +425,15 @@ const CallLogDisplay = ({
       return true;
     } catch (error) {
       clearTimeout(timeoutId);
-      console.error(`Error transcribing ${contactId}:`, error);
+      console.error(`💥 Transcription error for ${contactId}:`, error);
 
       let errorMessage = "Unknown error";
       
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          errorMessage = "Transcription timed out after 5 minutes";
+          errorMessage = "Transcription timed out after 4 minutes. Please try again.";
+        } else if (error.message.includes('504') || error.message.includes('timeout')) {
+          errorMessage = "Request timed out. Please try again.";
         } else {
           errorMessage = error.message;
         }
@@ -495,20 +452,16 @@ const CallLogDisplay = ({
         )
       );
 
-      // Add to failed transcriptions set
       setFailedTranscriptions(prev => new Set(prev).add(contactId));
-
       return false;
     } finally {
-      // Always cleanup resources
       cleanupTranscription(contactId);
     }
   }, [cleanupTranscription]);
 
-  // Add log to transcription queue with duplicate prevention
+  // Queue management
   const queueTranscription = useCallback((logId: string) => {
     setTranscriptionQueue((prev) => {
-      // Don't add if already in queue, active, or failed
       if (prev.includes(logId) || 
           activeTranscriptions.has(logId) || 
           failedTranscriptions.has(logId)) {
@@ -518,7 +471,7 @@ const CallLogDisplay = ({
     });
   }, [activeTranscriptions, failedTranscriptions]);
 
-  // Improved queue processing with better concurrency control
+  // Process queue
   useEffect(() => {
     const processQueue = async () => {
       if (transcriptionQueue.length === 0) return;
@@ -526,10 +479,8 @@ const CallLogDisplay = ({
       const availableSlots = maxConcurrentTranscriptions - activeTranscriptions.size;
       if (availableSlots <= 0) return;
 
-      // Take only the first N items from the queue
       const logsToProcess = transcriptionQueue.slice(0, availableSlots);
 
-      // Remove these logs from queue and add to active
       setTranscriptionQueue((prev) =>
         prev.filter((id) => !logsToProcess.includes(id))
       );
@@ -540,12 +491,10 @@ const CallLogDisplay = ({
         return newSet;
       });
 
-      // Process each log with proper async handling
       const transcriptionPromises = logsToProcess.map(async (logId) => {
         const logToTranscribe = callLogs.find(log => log.contact_id === logId);
 
         if (!logToTranscribe || !logToTranscribe.recording_location) {
-          console.error(`Invalid log for transcription: ${logId}`);
           setActiveTranscriptions(prev => {
             const newSet = new Set(prev);
             newSet.delete(logId);
@@ -557,24 +506,17 @@ const CallLogDisplay = ({
         try {
           await initiateTranscription(logToTranscribe);
         } catch (error) {
-          console.error(`Error processing queue item ${logId}:`, error);
+          console.error(`Error processing ${logId}:`, error);
         }
       });
 
-      // Wait for all transcriptions to complete
       await Promise.allSettled(transcriptionPromises);
     };
 
     processQueue();
-  }, [
-    transcriptionQueue,
-    activeTranscriptions,
-    callLogs,
-    initiateTranscription,
-    maxConcurrentTranscriptions,
-  ]);
+  }, [transcriptionQueue, activeTranscriptions, callLogs, initiateTranscription, maxConcurrentTranscriptions]);
 
-  // Fetch call logs whenever the selected date range changes
+  // Fetch call logs
   useEffect(() => {
     const fetchCallLogs = async () => {
       if (!selectedDateRange) return;
@@ -595,19 +537,17 @@ const CallLogDisplay = ({
         if (data.success) {
           const logsWithTranscriptionStatus = data.data.map((log: CallLog) => ({
             ...log,
-            transcriptionStatus: log.existsInSupabase
-              ? "Transcribed"
-              : "Pending Transcription",
+            transcriptionStatus: log.existsInSupabase ? "Transcribed" : "Pending Transcription",
           }));
 
           setCallLogs(logsWithTranscriptionStatus);
           
-          // Reset transcription state when new data is loaded
+          // Reset transcription state
           setTranscriptionQueue([]);
           setActiveTranscriptions(new Set());
           setFailedTranscriptions(new Set());
           
-          // Clear any existing intervals and controllers
+          // Clear intervals and controllers
           progressIntervals.current.forEach(interval => clearInterval(interval));
           transcriptionControllers.current.forEach(controller => controller.abort());
           progressIntervals.current.clear();
@@ -626,10 +566,10 @@ const CallLogDisplay = ({
     fetchCallLogs();
   }, [selectedDateRange, checkSupabase]);
 
-  // Auto-queue logs with better logic and limits
+  // OPTIMIZED: Auto-queue more aggressively for small files
   useEffect(() => {
     if (!loading && callLogs.length > 0) {
-      const maxAutoQueue = 10; // Reduced from 15 to 10 for better stability
+      const maxAutoQueue = 10; // Increased for small files
       let queued = 0;
 
       const totalInProgress = transcriptionQueue.length + activeTranscriptions.size;
@@ -645,30 +585,20 @@ const CallLogDisplay = ({
             !failedTranscriptions.has(log.contact_id) &&
             queued < (maxAutoQueue - totalInProgress)
           ) {
-            console.log(`Auto-queueing transcription for call ${log.contact_id}`);
+            console.log(`📋 Auto-queueing small file: ${log.contact_id}`);
             queueTranscription(log.contact_id);
             queued++;
           }
         });
       }
     }
-  }, [
-    paginatedCallLogs,
-    loading,
-    queueTranscription,
-    transcriptionQueue,
-    activeTranscriptions,
-    failedTranscriptions,
-  ]);
+  }, [paginatedCallLogs, loading, queueTranscription, transcriptionQueue, activeTranscriptions, failedTranscriptions]);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
   };
 
-  const formatCallDuration = (totalCallTime: {
-    minutes: number;
-    seconds: number;
-  }) => {
+  const formatCallDuration = (totalCallTime: { minutes: number; seconds: number }) => {
     if (!totalCallTime) return "N/A";
     const { minutes = 0, seconds = 0 } = totalCallTime;
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
@@ -679,16 +609,14 @@ const CallLogDisplay = ({
     return sortDirection === 'asc' ? '↑' : '↓';
   };
 
-  // Manual retry function for failed transcriptions
+  // Retry failed transcriptions
   const retryTranscription = useCallback((contactId: string) => {
-    // Remove from failed set and add to queue
     setFailedTranscriptions(prev => {
       const newSet = new Set(prev);
       newSet.delete(contactId);
       return newSet;
     });
     
-    // Reset the log status
     setCallLogs(prevLogs =>
       prevLogs.map(l =>
         l.contact_id === contactId
@@ -702,13 +630,11 @@ const CallLogDisplay = ({
       )
     );
     
-    // Queue for retry
     queueTranscription(contactId);
   }, [queueTranscription]);
 
   return (
     <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
-      {/* Header with title and overview button */}
       <div className="flex items-center justify-between mb-4">
         <h5 className="text-[#4ecca3]">Call Logs</h5>
         <Link
@@ -753,7 +679,7 @@ const CallLogDisplay = ({
             </div>
           )}
 
-          {/* Enhanced queue status indicator */}
+          {/* Queue status */}
           {(transcriptionQueue.length > 0 || activeTranscriptions.size > 0 || failedTranscriptions.size > 0) && (
             <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
               <div className="text-sm text-[#4ecca3] font-medium">
@@ -763,7 +689,7 @@ const CallLogDisplay = ({
                 )}
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                Processing one transcription at a time to avoid timeouts
+                ⚡ Optimized for small files - processing up to 2 simultaneously
               </div>
             </div>
           )}
@@ -912,7 +838,6 @@ const CallLogDisplay = ({
                                   View Details
                                 </Link>
                                 
-                                {/* Add retry button for failed transcriptions */}
                                 {log.transcriptionStatus === "Failed" && (
                                   <button
                                     onClick={() => retryTranscription(log.contact_id)}
@@ -923,7 +848,6 @@ const CallLogDisplay = ({
                                   </button>
                                 )}
                                 
-                                {/* Audio Download Button */}
                                 {log.recording_location && (
                                   <button
                                     onClick={() => handleAudioDownload(log)}

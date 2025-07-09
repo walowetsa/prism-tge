@@ -33,6 +33,8 @@ interface CallLog {
 type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
 type SortDirection = 'asc' | 'desc';
 
+const ITEMS_PER_PAGE = 100;
+
 const CallLogDisplay = ({
   selectedDateRange,
   checkSupabase = true,
@@ -50,6 +52,9 @@ const CallLogDisplay = ({
   // Sorting state
   const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Transcription state management - INCREASED TO 5 CONCURRENT
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
@@ -110,6 +115,14 @@ const CallLogDisplay = ({
     });
   }, [callLogs, selectedAgent, sortField, sortDirection]);
 
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredAndSortedCallLogs.length / ITEMS_PER_PAGE);
+  const paginatedCallLogs = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    const endIndex = startIndex + ITEMS_PER_PAGE;
+    return filteredAndSortedCallLogs.slice(startIndex, endIndex);
+  }, [filteredAndSortedCallLogs, currentPage]);
+
   // Handle sorting
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -120,10 +133,16 @@ const CallLogDisplay = ({
     }
   };
 
-  // Reset agent filter when new data is loaded
+  // Reset agent filter and pagination when new data is loaded
   useEffect(() => {
     setSelectedAgent("all");
+    setCurrentPage(1);
   }, [selectedDateRange]);
+
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedAgent, sortField, sortDirection]);
 
   // Function to categorise transcript
   // TODO: Fix Typing
@@ -552,7 +571,7 @@ const CallLogDisplay = ({
         transcriptionQueue.length + activeTranscriptions.length <
         maxAutoQueue
       ) {
-        filteredAndSortedCallLogs.forEach((log) => {
+        paginatedCallLogs.forEach((log) => {
           if (
             log.recording_location &&
             log.transcriptionStatus === "Pending Transcription" &&
@@ -572,7 +591,7 @@ const CallLogDisplay = ({
       }
     }
   }, [
-    filteredAndSortedCallLogs,
+    paginatedCallLogs,
     loading,
     queueTranscription,
     transcriptionQueue.length,
@@ -667,11 +686,50 @@ const CallLogDisplay = ({
 
           {!loading && !error && (
             <div>
-              <div className="mb-4 text-sm text-white">
-                {selectedAgent === "all" 
-                  ? `Found ${callLogs.length} call(s)` 
-                  : `Showing ${filteredAndSortedCallLogs.length} call(s) for ${selectedAgent} (${callLogs.length} total calls)`
-                }
+              <div className="mb-4 flex justify-between items-center">
+                <div className="text-sm text-white">
+                  {selectedAgent === "all" 
+                    ? `Found ${filteredAndSortedCallLogs.length} call(s) - Page ${currentPage} of ${totalPages} (showing ${paginatedCallLogs.length} records)` 
+                    : `Showing ${filteredAndSortedCallLogs.length} call(s) for ${selectedAgent} - Page ${currentPage} of ${totalPages} (${paginatedCallLogs.length} records) - ${callLogs.length} total calls`
+                  }
+                </div>
+                
+                {/* Pagination Controls */}
+                {totalPages > 1 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => setCurrentPage(1)}
+                      disabled={currentPage === 1}
+                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
+                    >
+                      First
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs text-white px-2">
+                      {currentPage} / {totalPages}
+                    </span>
+                    <button
+                      onClick={() => setCurrentPage(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
+                    >
+                      Next
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(totalPages)}
+                      disabled={currentPage === totalPages}
+                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
+                    >
+                      Last
+                    </button>
+                  </div>
+                )}
               </div>
 
               {filteredAndSortedCallLogs.length === 0 ? (
@@ -682,84 +740,86 @@ const CallLogDisplay = ({
                   }
                 </div>
               ) : (
-                <div className="overflow-x-auto border border-border rounded-lg">
-                  <table className="min-w-full bg-bg-primary">
-                    <thead className="bg-bg-secondary border-b border-border sticky top-0">
-                      <tr>
-                        <th 
-                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                          onClick={() => handleSort('agent_username')}
-                        >
-                          Agent {getSortIcon('agent_username')}
-                        </th>
-                        <th 
-                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                          onClick={() => handleSort('initiation_timestamp')}
-                        >
-                          Call Date/Time {getSortIcon('initiation_timestamp')}
-                        </th>
-                        <th 
-                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                          onClick={() => handleSort('total_call_time')}
-                        >
-                          Duration {getSortIcon('total_call_time')}
-                        </th>
-                        <th 
-                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                          onClick={() => handleSort('queue_name')}
-                        >
-                          Queue {getSortIcon('queue_name')}
-                        </th>
-                        <th 
-                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                          onClick={() => handleSort('disposition_title')}
-                        >
-                          Disposition {getSortIcon('disposition_title')}
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
-                          Transcription Status
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border">
-                      {filteredAndSortedCallLogs.map((log, index) => (
-                        <tr 
-                          key={log.contact_id || index}
-                          className="hover:bg-gray-800 transition-colors"
-                        >
-                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                            {log.agent_username}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                            {formatTimestamp(log.initiation_timestamp)}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                            {formatCallDuration(log.total_call_time)}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                            {log.queue_name || "N/A"}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                            {log.disposition_title || "N/A"}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm">
-                            {getTranscriptionStatus(log)}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm">
-                            <Link 
-                              href={`/tge/${log.contact_id}`}
-                              className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
-                            >
-                              View Details
-                            </Link>
-                          </td>
+                <div className="overflow-hidden border border-border rounded-lg">
+                  <div className="overflow-x-auto max-h-[calc(100vh-320px)]">
+                    <table className="min-w-full bg-bg-primary">
+                      <thead className="bg-bg-secondary border-b border-border sticky top-0 z-10">
+                        <tr>
+                          <th 
+                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                            onClick={() => handleSort('agent_username')}
+                          >
+                            Agent {getSortIcon('agent_username')}
+                          </th>
+                          <th 
+                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                            onClick={() => handleSort('initiation_timestamp')}
+                          >
+                            Call Date/Time {getSortIcon('initiation_timestamp')}
+                          </th>
+                          <th 
+                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                            onClick={() => handleSort('total_call_time')}
+                          >
+                            Duration {getSortIcon('total_call_time')}
+                          </th>
+                          <th 
+                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                            onClick={() => handleSort('queue_name')}
+                          >
+                            Queue {getSortIcon('queue_name')}
+                          </th>
+                          <th 
+                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                            onClick={() => handleSort('disposition_title')}
+                          >
+                            Disposition {getSortIcon('disposition_title')}
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
+                            Transcription Status
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
+                            Actions
+                          </th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {paginatedCallLogs.map((log, index) => (
+                          <tr 
+                            key={log.contact_id || index}
+                            className="hover:bg-gray-800 transition-colors"
+                          >
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {log.agent_username}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {formatTimestamp(log.initiation_timestamp)}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {formatCallDuration(log.total_call_time)}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {log.queue_name || "N/A"}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {log.disposition_title || "N/A"}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm">
+                              {getTranscriptionStatus(log)}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm">
+                              <Link 
+                                href={`/tge/${log.contact_id}`}
+                                className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
+                              >
+                                View Details
+                              </Link>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>

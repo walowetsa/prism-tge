@@ -1,264 +1,363 @@
+/* eslint-disable prefer-const */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from "next/server";
-// import { transcriptionExists, getTranscription, saveTranscription } from "@/lib/transcription-storage";
 
 /**
  * Helper function to save transcription to Supabase
- * @param callId The unique identifier for the call
- * @param transcriptData The complete transcript data from AssemblyAI
- * @param transcriptText The extracted text from the transcription
  */
-
 async function saveToSupabase(
   callId: string,
-  // TODO: Fix Typing
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   transcriptData: any,
   transcriptText: string
 ) {
   try {
-    // Try different possible API route paths
-    const serverUrl =
-      process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
+    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
+    const apiUrl = `${serverUrl}/api/supabase/save-transcription`;
 
-    // Try the most common paths for Next.js API routes
-    const possiblePaths = [
-      `${serverUrl}/api/supabase/save-transcription`, // Updated to correct path
-      `${serverUrl}/api/supabase`,
-      `${serverUrl}/api/supabase/route`,
-      `${serverUrl}/api/transcriptions`,
-    ];
+    console.log(`💾 Saving transcription to Supabase for call ID: ${callId}`);
 
-    console.log(`Saving transcription to Supabase for call ID: ${callId}`);
+    const payload = {
+      contact_id: callId,
+      recording_location: transcriptData.recording_location || "",
+      transcript_text: transcriptText,
+      queue_name: transcriptData.queue_name || null,
+      agent_username: transcriptData.agent_username || "",
+      initiation_timestamp: transcriptData.initiation_timestamp || new Date().toISOString(),
+      speaker_data: transcriptData.utterances ? JSON.stringify(transcriptData.utterances) : null,
+      sentiment_analysis: transcriptData.sentiment_analysis_results ? JSON.stringify(transcriptData.sentiment_analysis_results) : null,
+      entities: transcriptData.entities ? JSON.stringify(transcriptData.entities) : null,
+      disposition_title: transcriptData.disposition_title || null,
+      call_summary: transcriptData.summary || null,
+      campaign_name: transcriptData.campaign_name || null,
+      campaign_id: transcriptData.campaign_id || null,
+      customer_cli: transcriptData.customer_cli || null,
+      agent_hold_time: transcriptData.agent_hold_time || null,
+      total_hold_time: transcriptData.total_hold_time || null,
+      time_in_queue: transcriptData.time_in_queue || null,
+      call_duration: transcriptData.call_duration || null,
+      categories: transcriptData.topic_categorization?.all_topics ? JSON.stringify(transcriptData.topic_categorization.all_topics) : null,
+      primary_category: transcriptData.topic_categorization?.primary_topic || null,
+    };
 
-    let lastError;
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-    for (const apiUrl of possiblePaths) {
-      try {
-        console.log(`Trying Supabase API URL: ${apiUrl}`);
-
-        // Prepare the data payload with categorization info
-        const payload = {
-          contact_id: callId,
-          recording_location: transcriptData.recording_location || "",
-          transcript_text: transcriptText,
-          queue_name: transcriptData.queue_name || null,
-          agent_username: transcriptData.agent_username || "",
-          initiation_timestamp:
-            transcriptData.initiation_timestamp || new Date().toISOString(),
-          speaker_data: transcriptData.utterances
-            ? JSON.stringify(transcriptData.utterances)
-            : null,
-          sentiment_analysis: transcriptData.sentiment_analysis_results
-            ? JSON.stringify(transcriptData.sentiment_analysis_results)
-            : null,
-          entities: transcriptData.entities
-            ? JSON.stringify(transcriptData.entities)
-            : null,
-          disposition_title: transcriptData.disposition_title || null,
-          call_summary: transcriptData.summary || null,
-          campaign_name: transcriptData.campaign_name || null,
-          campaign_id: transcriptData.campaign_id || null,
-          customer_cli: transcriptData.customer_cli || null,
-          agent_hold_time: transcriptData.agent_hold_time || null,
-          total_hold_time: transcriptData.total_hold_time || null,
-          time_in_queue: transcriptData.time_in_queue || null,
-          call_duration: transcriptData.call_duration || null,
-          // Add categorization data to correct columns
-          categories: transcriptData.topic_categorization?.all_topics
-            ? JSON.stringify(transcriptData.topic_categorization.all_topics)
-            : null,
-          primary_category:
-            transcriptData.topic_categorization?.primary_topic || null,
-        };
-
-        const response = await fetch(apiUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-        });
-
-        console.log(`Response status for ${apiUrl}: ${response.status}`);
-
-        if (response.status === 404) {
-          console.log(`404 for ${apiUrl}, trying next path...`);
-          continue; // Try the next path
-        }
-
-        if (!response.ok) {
-          // Try to get the response as text first
-          const responseText = await response.text();
-          console.error(`Error response from ${apiUrl}:`, responseText);
-
-          let errorData;
-          try {
-            errorData = JSON.parse(responseText);
-          } catch {
-            errorData = {
-              error: "Non-JSON response received",
-              status: response.status,
-              responseText: responseText.substring(0, 500),
-            };
-          }
-
-          throw new Error(
-            `Supabase save failed: ${response.status} - ${
-              errorData.error || "Unknown error"
-            }`
-          );
-        }
-
-        // Success!
-        const result = await response.json();
-        console.log(
-          `Successfully saved to Supabase via ${apiUrl}:`,
-          result.data?.id || result.data?.contact_id
-        );
-        return result.data;
-      } catch (fetchError) {
-        if (fetchError instanceof Error) {
-          console.log(`Failed to use ${apiUrl}:`, fetchError.message);
-        } else {
-          console.log(`Failed to use ${apiUrl}:`, String(fetchError));
-        }
-
-        lastError = fetchError;
-        continue;
-      }
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Supabase save failed for ${callId}:`, errorText);
+      throw new Error(`Supabase save failed: ${response.status} - ${errorText}`);
     }
 
-    // If we get here, all paths failed
-    throw lastError || new Error("All API paths failed");
+    const result = await response.json();
+    console.log(`✅ Successfully saved to Supabase:`, result.data?.contact_id);
+    return result.data;
   } catch (error) {
-    console.error("Error saving to Supabase:", error);
-
-    console.log(
-      "Current working directory check - your API route should be at one of these locations:"
-    );
-    console.log(
-      "- src/app/api/supabase/save-transcription/route.ts (App Router)"
-    );
-    console.log("- pages/api/supabase.ts (Pages Router)");
-    console.log("- src/pages/api/supabase.ts (Pages Router with src)");
-
+    console.error("❌ Error saving to Supabase:", error);
     return null;
   }
 }
 
 /**
- * Helper function to download a file from SFTP
- * @param sftpFilename The filename or path in the SFTP server
- * @returns An audio blob
+ * Helper function to validate audio file format - IMPROVED VERSION
  */
-async function getSftpAudio(sftpFilename: string) {
-  console.log("Handling SFTP file directly:", sftpFilename);
-
-  // Create a server-side request to our own SFTP download API
-  const serverUrl =
-    process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
-  const sftpApiUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(
-    sftpFilename
-  )}`;
-
-  console.log("Fetching SFTP file from:", sftpApiUrl);
-
-  // Fetch the audio file directly from our SFTP API
-  const audioResponse = await fetch(sftpApiUrl);
-  if (!audioResponse.ok) {
-    console.error("Failed to fetch SFTP file:", await audioResponse.text());
-    throw new Error(`Failed to fetch SFTP file: ${audioResponse.status}`);
+function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: string; details: string; extension: string } {
+  const uint8Array = new Uint8Array(buffer);
+  
+  if (uint8Array.length < 12) {
+    return { isValid: false, fileType: "unknown", details: "File too small to be valid audio", extension: ".bin" };
   }
 
-  const audioBlob = await audioResponse.blob();
-  console.log("Audio blob size (direct SFTP):", audioBlob.size);
-
-  if (audioBlob.size === 0) {
-    console.error("Retrieved audio file is empty");
-    throw new Error("Retrieved audio file is empty");
+  // Check for WAV format (RIFF container with WAVE format)
+  const riffHeader = Array.from(uint8Array.slice(0, 4)).map(b => String.fromCharCode(b)).join('');
+  const waveHeader = Array.from(uint8Array.slice(8, 12)).map(b => String.fromCharCode(b)).join('');
+  
+  if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
+    return { isValid: true, fileType: "audio/wav", details: "Valid WAV file", extension: ".wav" };
   }
 
-  return audioBlob;
+  // Check for MP3 format
+  if (uint8Array.length >= 3) {
+    // MP3 files can start with ID3 tags or direct audio frames
+    const id3Header = Array.from(uint8Array.slice(0, 3)).map(b => String.fromCharCode(b)).join('');
+    if (id3Header === 'ID3') {
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file with ID3 tags", extension: ".mp3" };
+    }
+    
+    // Check for MP3 frame sync (0xFF followed by 0xFB, 0xFA, or 0xF3, 0xF2)
+    if (uint8Array[0] === 0xFF && (uint8Array[1] & 0xE0) === 0xE0) {
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file", extension: ".mp3" };
+    }
+  }
+
+  // Check for OGG format
+  if (uint8Array.length >= 4) {
+    const oggHeader = Array.from(uint8Array.slice(0, 4)).map(b => String.fromCharCode(b)).join('');
+    if (oggHeader === 'OggS') {
+      return { isValid: true, fileType: "audio/ogg", details: "Valid OGG file", extension: ".ogg" };
+    }
+  }
+
+  // Check for M4A/AAC format
+  if (uint8Array.length >= 8) {
+    const m4aHeader = Array.from(uint8Array.slice(4, 8)).map(b => String.fromCharCode(b)).join('');
+    if (m4aHeader === 'ftyp') {
+      return { isValid: true, fileType: "audio/mp4", details: "Valid M4A/MP4 audio file", extension: ".m4a" };
+    }
+  }
+
+  // If we get here, it's not a recognized audio format
+  const firstBytes = Array.from(uint8Array.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+  return { 
+    isValid: false, 
+    fileType: "application/octet-stream", 
+    details: `Unrecognized audio format. First 16 bytes: ${firstBytes}`,
+    extension: ".bin"
+  };
 }
 
 /**
- * Helper function to handle audio files from a URL
- * @param audioUrl The URL of the audio file
- * @returns An audio blob
+ * Helper function to download a file from SFTP with improved error handling
+ * Returns ArrayBuffer instead of Blob
  */
-async function getAudioFromUrl(audioUrl: string) {
-  // Check if this is a local file path
-  const isLocalPath = audioUrl.startsWith("/api/");
+async function getSftpAudioBuffer(sftpFilename: string): Promise<ArrayBuffer> {
+  console.log("🔄 Downloading SFTP file:", sftpFilename);
 
-  if (isLocalPath) {
-    // For local files, we need to get the actual audio file
-    const serverUrl =
-      process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
-    const fullAudioUrl = `${serverUrl}${audioUrl}`;
+  const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
+  const sftpApiUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(sftpFilename)}`;
 
-    console.log("Fetching audio from local path:", fullAudioUrl);
+  console.log("📡 SFTP API URL:", sftpApiUrl);
 
-    // Fetch the audio file
-    const audioResponse = await fetch(fullAudioUrl);
+  try {
+    // Add timeout to prevent hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+    const audioResponse = await fetch(sftpApiUrl, {
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    console.log(`📡 SFTP Response Status: ${audioResponse.status}`);
+    console.log(`📡 SFTP Response Headers:`, Object.fromEntries(audioResponse.headers.entries()));
+
     if (!audioResponse.ok) {
-      console.error("Failed to fetch audio file:", await audioResponse.text());
-      throw new Error(`Failed to fetch audio file: ${audioResponse.status}`);
+      const errorText = await audioResponse.text();
+      console.error("❌ SFTP download failed:", errorText);
+      throw new Error(`SFTP download failed: ${audioResponse.status} - ${errorText}`);
     }
 
-    const audioBlob = await audioResponse.blob();
-    console.log("Audio blob size from local path:", audioBlob.size);
+    // Get as ArrayBuffer directly
+    const audioArrayBuffer = await audioResponse.arrayBuffer();
+    console.log(`📁 Audio ArrayBuffer size: ${audioArrayBuffer.byteLength} bytes`);
 
-    if (audioBlob.size === 0) {
+    if (audioArrayBuffer.byteLength === 0) {
       throw new Error("Retrieved audio file is empty");
     }
 
-    return audioBlob;
-  } else {
-    // If it's an external URL, just return the URL for AssemblyAI to fetch directly
-    console.log("Using external audio URL:", audioUrl);
-    return audioUrl;
+    if (audioArrayBuffer.byteLength < 1000) {
+      throw new Error("Audio file is too small to be valid (< 1KB)");
+    }
+
+    // Validate the audio file format
+    const validation = validateAudioFile(audioArrayBuffer);
+    console.log(`🔍 Audio validation result:`, validation);
+
+    if (!validation.isValid) {
+      const uint8Array = new Uint8Array(audioArrayBuffer);
+      const firstBytes = Array.from(uint8Array.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.error(`❌ Invalid audio file format. Details: ${validation.details}`);
+      console.error(`🔍 First 32 bytes: ${firstBytes}`);
+      
+      // Try to detect if this might be a text file or HTML error page
+      const textContent = Array.from(uint8Array.slice(0, 100))
+        .map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.')
+        .join('');
+      console.error(`🔍 Text interpretation of first 100 bytes: "${textContent}"`);
+      
+      throw new Error(`Invalid audio file format: ${validation.details}. File appears to be ${validation.fileType}`);
+    }
+
+    console.log(`✅ Valid ${validation.fileType} file detected: ${validation.details}`);
+    return audioArrayBuffer;
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        throw new Error("SFTP download timed out after 30 seconds");
+      }
+      throw new Error(`SFTP download error: ${error.message}`);
+    }
+    throw new Error("Unknown SFTP download error");
   }
 }
 
 /**
- * Helper function to upload audio to AssemblyAI
- * @param audioBlob The audio blob or URL to upload
- * @param apiKey The AssemblyAI API key
- * @returns The upload URL for transcription
+ * FIXED: Helper function to upload audio to AssemblyAI using ArrayBuffer
+ * Major improvements in buffer handling and file creation
  */
-async function uploadToAssemblyAI(audioBlob: Blob | string, apiKey: string) {
-  if (typeof audioBlob === "string") {
-    return audioBlob;
+async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, originalFilename?: string) {
+  console.log("⬆️ Uploading to AssemblyAI...");
+  console.log(`📁 Upload buffer size: ${audioBuffer.byteLength} bytes`);
+
+  // Validate audio buffer
+  if (audioBuffer.byteLength === 0) {
+    throw new Error("Audio buffer is empty");
   }
 
-  console.log("Uploading blob to AssemblyAI...");
-  const uploadFormData = new FormData();
-  uploadFormData.append("file", audioBlob, "audio.mp3");
-
-  const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
-    method: "POST",
-    headers: {
-      Authorization: apiKey,
-    },
-    body: uploadFormData,
-  });
-
-  if (!uploadResponse.ok) {
-    const errorData = await uploadResponse.json();
-    console.error("Upload error:", errorData);
-    throw new Error(
-      `Failed to upload audio to AssemblyAI: ${JSON.stringify(errorData)}`
-    );
+  if (audioBuffer.byteLength < 1000) {
+    throw new Error("Audio buffer is too small to be valid (< 1KB)");
   }
 
-  const uploadData = await uploadResponse.json();
-  console.log("Upload successful. Upload URL:", uploadData.upload_url);
-  return uploadData.upload_url;
+  try {
+    // FIXED: Re-validate the audio file format before upload with improved validation
+    const validation = validateAudioFile(audioBuffer);
+    console.log(`🔍 Pre-upload validation:`, validation);
+
+    if (!validation.isValid) {
+      throw new Error(`Cannot upload invalid audio file: ${validation.details}`);
+    }
+    
+    // FIXED: Simplified and more reliable filename and MIME type handling
+    const mimeType = validation.fileType;
+    const detectedExtension = validation.extension;
+    
+    // FIXED: Better filename handling - preserve original if valid, otherwise use detected format
+    let filename: string;
+    
+    if (originalFilename) {
+      // Extract base name without extension
+      const baseName = originalFilename.replace(/\.[^/.]+$/, '') || originalFilename;
+      // Always use the detected extension for consistency
+      filename = `${baseName}${detectedExtension}`;
+    } else {
+      filename = `audio${detectedExtension}`;
+    }
+    
+    console.log(`📋 Final filename: ${filename} with MIME type: ${mimeType}`);
+    
+    // FIXED: Create File object with proper Uint8Array instead of ArrayBuffer directly
+    // This ensures better compatibility across browsers and environments
+    const uint8Array = new Uint8Array(audioBuffer);
+    const audioFile = new File([uint8Array], filename, { 
+      type: mimeType
+      // REMOVED: lastModified as it's not necessary and can cause issues
+    });
+    
+    // FIXED: Validate File object was created correctly
+    if (audioFile.size !== audioBuffer.byteLength) {
+      throw new Error(`File object size mismatch: expected ${audioBuffer.byteLength}, got ${audioFile.size}`);
+    }
+    
+    // Create FormData
+    const uploadFormData = new FormData();
+    uploadFormData.append("file", audioFile);
+
+    // Log detailed information for debugging
+    console.log(`📋 FormData details:`);
+    console.log(`   - Filename: ${filename}`);
+    console.log(`   - File size: ${audioFile.size} bytes`);
+    console.log(`   - MIME type: ${audioFile.type}`);
+    console.log(`   - Detected format: ${validation.details}`);
+    console.log(`   - Buffer matches file size: ${audioBuffer.byteLength === audioFile.size}`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // INCREASED: 120 seconds for larger files
+
+    console.log(`🚀 Starting upload to AssemblyAI...`);
+
+    const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        // FIXED: Explicitly avoid setting Content-Type to let browser handle multipart boundary
+      },
+      body: uploadFormData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    console.log(`⬆️ AssemblyAI Upload Status: ${uploadResponse.status}`);
+    console.log(`📋 AssemblyAI Response Headers:`, Object.fromEntries(uploadResponse.headers.entries()));
+
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      console.error("❌ AssemblyAI upload error response:", errorText);
+      
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { error: errorText };
+      }
+      
+      // IMPROVED: More specific error information with troubleshooting
+      if (uploadResponse.status === 400) {
+        console.error("🚨 Bad Request - Audio format or file issue");
+        console.error("🔍 File validation details:", validation);
+        console.error("🔍 File object details:", {
+          name: audioFile.name,
+          size: audioFile.size,
+          type: audioFile.type,
+          lastModified: audioFile.lastModified
+        });
+        throw new Error(`AssemblyAI rejected the file (400): ${JSON.stringify(errorData)}. Check audio format compatibility.`);
+      } else if (uploadResponse.status === 413) {
+        console.error("🚨 File too large for AssemblyAI");
+        throw new Error(`File too large (413): ${JSON.stringify(errorData)}. Maximum file size exceeded.`);
+      } else if (uploadResponse.status === 401) {
+        console.error("🚨 Authentication failed");
+        throw new Error(`Authentication failed (401): Check AssemblyAI API key.`);
+      }
+      
+      throw new Error(`AssemblyAI upload failed (${uploadResponse.status}): ${JSON.stringify(errorData)}`);
+    }
+
+    const uploadData = await uploadResponse.json();
+    console.log("✅ Upload successful. Upload URL:", uploadData.upload_url);
+    
+    // FIXED: Better validation of upload response
+    if (!uploadData.upload_url || typeof uploadData.upload_url !== 'string') {
+      console.error("❌ Invalid upload response:", uploadData);
+      throw new Error("AssemblyAI upload succeeded but returned invalid upload_url");
+    }
+    
+    // FIXED: Validate upload URL format
+    try {
+      new URL(uploadData.upload_url);
+    } catch {
+      throw new Error(`AssemblyAI returned invalid upload URL: ${uploadData.upload_url}`);
+    }
+    
+    return uploadData.upload_url;
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        throw new Error("AssemblyAI upload timed out after 120 seconds");
+      }
+      // FIXED: Preserve original error message for better debugging
+      throw new Error(`AssemblyAI upload error: ${error.message}`);
+    }
+    throw new Error("Unknown AssemblyAI upload error");
+  }
 }
 
 export async function POST(request: Request) {
+  console.log("🎯 Transcribe API called");
+  
   try {
     const body = await request.json();
+    console.log("📝 Request body:", {
+      hasAudioUrl: !!body.audioUrl,
+      isDirectSftpFile: body.isDirectSftpFile,
+      sftpFilename: body.sftpFilename,
+      filename: body.filename,
+      speakerCount: body.speakerCount
+    });
+
     const {
       audioUrl,
       speakerCount = 2,
@@ -267,7 +366,7 @@ export async function POST(request: Request) {
       sftpFilename = null,
     } = body;
 
-    // Check if we have either an audioUrl or a direct SFTP file
+    // Validation
     if (!audioUrl && !isDirectSftpFile) {
       return NextResponse.json(
         { error: "Either Audio URL or SFTP filename is required" },
@@ -282,94 +381,134 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check if we already have the transcription saved
-    // if (transcriptionExists(filename)) {
-    //   console.log(`Using cached transcription for ${filename}`);
-    //   const cachedTranscription = getTranscription(filename);
-    //   return NextResponse.json(cachedTranscription);
-    // }
-
+    // Check API key
     const apiKey = process.env.ASSEMBLYAI_API_KEY;
-
     if (!apiKey) {
+      console.error("❌ AssemblyAI API key not configured");
       return NextResponse.json(
         { error: "AssemblyAI API key is not configured" },
         { status: 500 }
       );
     }
+    console.log("🔑 AssemblyAI API key found");
 
-    let fileToTranscribe;
+    let fileToTranscribe: string;
 
     try {
-      // Handle audio acquisition based on source type
       if (isDirectSftpFile && sftpFilename) {
-        // Get audio from SFTP
-        const audioBlob = await getSftpAudio(sftpFilename);
-        fileToTranscribe = await uploadToAssemblyAI(audioBlob, apiKey);
+        console.log("🔄 Processing SFTP file:", sftpFilename);
+        
+        // Get audio buffer from SFTP (no blob creation)
+        const audioBuffer = await getSftpAudioBuffer(sftpFilename);
+        console.log("✅ SFTP download successful");
+        
+        // Extract filename for better upload handling
+        const originalFilename = sftpFilename.split('/').pop() || filename;
+        console.log(`📝 Using filename for upload: ${originalFilename}`);
+        
+        // FIXED: Upload to AssemblyAI using improved buffer handling
+        fileToTranscribe = await uploadToAssemblyAI(audioBuffer, apiKey, originalFilename);
+        console.log("✅ AssemblyAI upload successful");
       } else if (audioUrl) {
-        // Get audio from URL (local or external)
-        const audioSource = await getAudioFromUrl(audioUrl);
-        fileToTranscribe = await uploadToAssemblyAI(audioSource, apiKey);
+        console.log("🔄 Processing audio URL:", audioUrl);
+        // For URL-based audio, use the URL directly
+        fileToTranscribe = audioUrl;
+      } else {
+        throw new Error("No valid audio source provided");
       }
     } catch (error) {
-      console.error("Error getting or uploading audio:", error);
+      console.error("❌ Error processing audio:", error);
+      
+      // IMPROVED: More specific error information for debugging
+      let errorDetails = "Failed during audio acquisition or upload phase";
+      let troubleshooting: string[] = [];
+      
+      if (error instanceof Error) {
+        if (error.message.includes("SFTP download")) {
+          errorDetails = "SFTP download failed - check if file exists and is accessible";
+          troubleshooting = [
+            "1. Verify the SFTP file path is correct",
+            "2. Check SFTP server connectivity",
+            "3. Ensure file permissions allow reading",
+            "4. Check if file exists at the specified location"
+          ];
+        } else if (error.message.includes("AssemblyAI upload")) {
+          errorDetails = "AssemblyAI upload failed - likely audio format or API issue";
+          troubleshooting = [
+            "1. Check if audio format is supported by AssemblyAI",
+            "2. Verify AssemblyAI API key is valid",
+            "3. Check file size is within AssemblyAI limits",
+            "4. Ensure audio file is not corrupted"
+          ];
+        } else if (error.message.includes("empty") || error.message.includes("size")) {
+          errorDetails = "Audio file is empty, corrupted, or too small";
+          troubleshooting = [
+            "1. Check if the source file is complete",
+            "2. Verify file is not truncated during transfer",
+            "3. Ensure file size is at least 1KB",
+            "4. Check SFTP transfer completed successfully"
+          ];
+        } else if (error.message.includes("Invalid audio file format")) {
+          errorDetails = "Audio file format is not supported or corrupted";
+          troubleshooting = [
+            "1. Supported formats: WAV, MP3, OGG, M4A",
+            "2. Check if file headers are intact",
+            "3. Try converting to WAV format",
+            "4. Verify file is not corrupted"
+          ];
+        }
+      }
+      
       return NextResponse.json(
-        { error: error instanceof Error ? error.message : "Error processing audio file" },
+        { 
+          error: error instanceof Error ? error.message : "Error processing audio file",
+          details: errorDetails,
+          troubleshooting
+        },
         { status: 500 }
       );
     }
 
-    console.log(
-      "Submitting transcription request with file:",
-      fileToTranscribe
-    );
+    console.log("🎤 Submitting transcription request to AssemblyAI with file:", fileToTranscribe);
 
     // Submit the transcription request to AssemblyAI
-    const transcriptResponse = await fetch(
-      "https://api.assemblyai.com/v2/transcript",
-      {
-        method: "POST",
-        headers: {
-          Authorization: apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          audio_url: fileToTranscribe,
-          speech_model: "slam-1",
-          keyterms_prompt: [
-            "mycar",
-            "tyre",
-            "auto",
-            "rego",
-            "speaking",
-            "you're",
-            "Pirelli",
-            "end",
-            "of",
-            "financial",
-            "year",
-            "sale",
-            "care",
-            "plan",
-            "end of financial year sale",
-            "tyre care plan",
-            "quote",
-            "email",
-          ],
-          speaker_labels: true,
-          speakers_expected: speakerCount || 2,
-          summarization: true,
-          summary_model: "conversational",
-          summary_type: "paragraph",
-          entity_detection: true,
-          sentiment_analysis: true,
-        }),
-      }
-    );
+    const transcriptRequestBody = {
+      audio_url: fileToTranscribe,
+      speech_model: "slam-1",
+      keyterms_prompt: [
+        "mycar", "tyre", "auto", "rego", "speaking", "you're", "Pirelli",
+        "end", "of", "financial", "year", "sale", "care", "plan",
+        "end of financial year sale", "tyre care plan", "quote", "email",
+      ],
+      speaker_labels: true,
+      speakers_expected: speakerCount || 2,
+      summarization: true,
+      summary_model: "conversational",
+      summary_type: "paragraph",
+      entity_detection: true,
+      sentiment_analysis: true,
+    };
+
+    console.log("📋 Transcription request config:", {
+      speakers_expected: transcriptRequestBody.speakers_expected,
+      speech_model: transcriptRequestBody.speech_model,
+      keyterms_count: transcriptRequestBody.keyterms_prompt.length
+    });
+
+    const transcriptResponse = await fetch("https://api.assemblyai.com/v2/transcript", {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(transcriptRequestBody),
+    });
+
+    console.log(`📡 AssemblyAI Transcript Request Status: ${transcriptResponse.status}`);
 
     if (!transcriptResponse.ok) {
       const errorData = await transcriptResponse.json();
-      console.error("Transcription request error:", errorData);
+      console.error("❌ Transcription request error:", errorData);
       return NextResponse.json(
         { error: "Failed to initiate transcription", details: errorData },
         { status: 500 }
@@ -377,33 +516,31 @@ export async function POST(request: Request) {
     }
 
     const { id } = await transcriptResponse.json();
-    console.log(`Transcription job created with ID: ${id}`);
+    console.log(`🆔 Transcription job created with ID: ${id}`);
 
     // Poll for the transcription result
     let transcript;
     let status = "processing";
     let attempts = 0;
-    const maxAttempts = 90; // Increased to 90 as diarization can take longer
+    const maxAttempts = 120; // 2 minutes
 
-    while (
-      (status === "processing" || status === "queued") &&
-      attempts < maxAttempts
-    ) {
+    console.log("⏳ Starting polling for transcription result...");
+
+    while ((status === "processing" || status === "queued") && attempts < maxAttempts) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       attempts++;
 
-      const statusResponse = await fetch(
-        `https://api.assemblyai.com/v2/transcript/${id}`,
-        {
-          headers: {
-            Authorization: apiKey,
-          },
-        }
-      );
+      if (attempts % 10 === 0) { // Log every 10 attempts
+        console.log(`⏳ Polling attempt ${attempts}/${maxAttempts}, status: ${status}`);
+      }
+
+      const statusResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
+        headers: { Authorization: apiKey },
+      });
 
       if (!statusResponse.ok) {
         const errorData = await statusResponse.json();
-        console.error("Status check error:", errorData);
+        console.error("❌ Status check error:", errorData);
         return NextResponse.json(
           { error: "Failed to check transcription status", details: errorData },
           { status: 500 }
@@ -412,82 +549,54 @@ export async function POST(request: Request) {
 
       transcript = await statusResponse.json();
       status = transcript.status;
-      console.log(`Transcription status: ${status}, attempt: ${attempts}`);
     }
 
+    console.log(`🏁 Final transcription status: ${status} after ${attempts} attempts`);
+
     if (status === "completed") {
+      console.log("✅ Transcription completed successfully");
+      console.log(`📝 Transcript length: ${transcript.text?.length || 0} characters`);
+      console.log(`🗣️ Utterances count: ${transcript.utterances?.length || 0}`);
+
       // Map speaker labels to Agent and Customer
       if (transcript.utterances && transcript.utterances.length > 0) {
-        transcript.utterances = transcript.utterances.map(
-          (utterance: { speaker: string }) => ({
-            ...utterance,
-            speakerRole: utterance.speaker === "A" ? "Agent" : "Customer",
-          })
-        );
+        transcript.utterances = transcript.utterances.map((utterance: { speaker: string }) => ({
+          ...utterance,
+          speakerRole: utterance.speaker === "A" ? "Agent" : "Customer",
+        }));
       }
 
       if (transcript.words && transcript.words.length > 0) {
-        transcript.words = transcript.words.map(
-          (word: { speaker: string }) => ({
-            ...word,
-            speakerRole: word.speaker === "A" ? "Agent" : "Customer",
-          })
-        );
+        transcript.words = transcript.words.map((word: { speaker: string }) => ({
+          ...word,
+          speakerRole: word.speaker === "A" ? "Agent" : "Customer",
+        }));
       }
 
-      // Call our custom topic categorization endpoint
+      // Call topic categorization endpoint
       try {
-        const serverUrl =
-          process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
+        console.log("🏷️ Starting topic categorization...");
+        const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
 
-        console.log("Sending transcript for categorization:", {
-          hasUtterances: !!(
-            transcript.utterances && transcript.utterances.length > 0
-          ),
-          utteranceCount: transcript.utterances?.length || 0,
-          transcriptLength: transcript.text?.length || 0,
+        const topicResponse = await fetch(`${serverUrl}/api/openAI/categorise`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript }),
         });
-
-        const topicResponse = await fetch(
-          `${serverUrl}/api/openAI/categorise`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ transcript }),
-          }
-        );
 
         if (topicResponse.ok) {
           const topicData = await topicResponse.json();
-          console.log("Topic categorization received:", topicData);
+          console.log("✅ Topic categorization completed:", topicData);
 
-          // Check if we got valid categorisation data
-          if (
-            topicData.topic_categories &&
-            topicData.topic_categories.length > 0
-          ) {
-            // Add the topic categorisation to the transcript object
+          if (topicData.topic_categories && topicData.topic_categories.length > 0) {
             transcript.topic_categorization = {
-              // Primary topic is the first in the array
               primary_topic: topicData.primary_category,
-              // Store all topics for more detailed analysis
               all_topics: topicData.topic_categories,
-              // Keep confidence for compatibility
               confidence: topicData.confidence || 1.0,
             };
-
-            console.log(
-              "Added valid topic categorization to transcript:",
-              transcript.topic_categorization
-            );
+            console.log("🏷️ Added topic categorization to transcript");
           } else {
-            console.warn(
-              "Categorization API returned invalid data:",
-              topicData
-            );
-            // Add a default topic in case of invalid response
+            console.warn("⚠️ Invalid categorization data received");
             transcript.topic_categorization = {
               primary_topic: "Uncategorised",
               all_topics: ["Uncategorised"],
@@ -496,13 +605,7 @@ export async function POST(request: Request) {
           }
         } else {
           const errorText = await topicResponse.text();
-          console.error(
-            "Failed to get topic categorization, status:",
-            topicResponse.status,
-            "response:",
-            errorText
-          );
-          // Add a default topic in case of failure
+          console.error("❌ Topic categorization failed:", topicResponse.status, errorText);
           transcript.topic_categorization = {
             primary_topic: "Uncategorised",
             all_topics: ["Uncategorised"],
@@ -510,7 +613,7 @@ export async function POST(request: Request) {
           };
         }
       } catch (topicError) {
-        console.error("Error in topic categorization:", topicError);
+        console.error("❌ Error in topic categorization:", topicError);
         transcript.topic_categorization = {
           primary_topic: "Uncategorised",
           all_topics: ["Uncategorised"],
@@ -518,40 +621,27 @@ export async function POST(request: Request) {
         };
       }
 
-      // Save the transcription for future use (local caching)
-      // saveTranscription(filename, transcript);
-      // console.log(`Saved transcription for ${filename}`);
-
-      // Save to Supabase database with categorization data
+      // Save to Supabase
       try {
-        // Use filename as call_id, or you can modify this to use a different identifier
-        const callId = filename.replace(/\.[^/.]+$/, ""); // Remove file extension
+        const callId = filename.replace(/\.[^/.]+$/, "");
         const transcriptText = transcript.text || "";
-
-        console.log(
-          "Saving to Supabase with categorization:",
-          transcript.topic_categorization
-        );
+        console.log("💾 Attempting to save to Supabase...");
         await saveToSupabase(callId, transcript, transcriptText);
       } catch (supabaseError) {
-        console.error(
-          "Failed to save to Supabase, but continuing:",
-          supabaseError
-        );
-        // We don't return an error here because the transcription was successful
-        // The local cache will still work even if Supabase fails
+        console.error("❌ Supabase save failed (continuing anyway):", supabaseError);
       }
 
+      console.log("🎉 Transcription process completed successfully");
       return NextResponse.json(transcript);
+
     } else if (attempts >= maxAttempts) {
+      console.error("⏰ Transcription timed out");
       return NextResponse.json(
-        {
-          error:
-            "Transcription timed out. The file might be too large or the service is busy.",
-        },
+        { error: "Transcription timed out. The file might be too large or the service is busy." },
         { status: 504 }
       );
     } else {
+      console.error(`❌ Transcription failed with status: ${status}`);
       return NextResponse.json(
         {
           error: `Transcription failed with status: ${status}`,
@@ -561,9 +651,13 @@ export async function POST(request: Request) {
       );
     }
   } catch (error) {
-    console.error("Error in transcribe API route:", error);
+    console.error("💥 Unexpected error in transcribe API route:", error);
     return NextResponse.json(
-      { error: "Internal server error", message: error instanceof Error ? error.message : "Unknown Error" },
+      { 
+        error: "Internal server error", 
+        message: error instanceof Error ? error.message : "Unknown Error",
+        stack: error instanceof Error ? error.stack : undefined
+      },
       { status: 500 }
     );
   }

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 
 interface DateRange {
@@ -26,8 +26,9 @@ interface CallLog {
   queue_name: string;
   disposition_title: string;
   existsInSupabase?: boolean;
-  transcriptionStatus?: "Transcribed" | "Pending Transcription";
+  transcriptionStatus?: "Transcribed" | "Pending Transcription" | "Failed";
   transcriptionProgress?: number;
+  transcriptionError?: string;
 }
 
 type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
@@ -59,12 +60,15 @@ const CallLogDisplay = ({
   // Audio download state
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // Transcription state management - INCREASED TO 5 CONCURRENT
+  // FIXED: Improved transcription state management
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
-  const [activeTranscriptions, setActiveTranscriptions] = useState<string[]>(
-    []
-  );
-  const maxConcurrentTranscriptions = 5;
+  const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
+  const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
+  const maxConcurrentTranscriptions = 1; // REDUCED from 5 to 1 for better stability
+  
+  // FIXED: Use refs to track progress intervals and prevent memory leaks
+  const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
 
   // Get unique agents from call logs
   const uniqueAgents = useMemo(() => {
@@ -125,6 +129,41 @@ const CallLogDisplay = ({
     const endIndex = startIndex + ITEMS_PER_PAGE;
     return filteredAndSortedCallLogs.slice(startIndex, endIndex);
   }, [filteredAndSortedCallLogs, currentPage]);
+
+  // FIXED: Cleanup function for transcription resources
+  const cleanupTranscription = useCallback((contactId: string) => {
+    // Clear progress interval
+    const interval = progressIntervals.current.get(contactId);
+    if (interval) {
+      clearInterval(interval);
+      progressIntervals.current.delete(contactId);
+    }
+    
+    // Abort any ongoing request
+    const controller = transcriptionControllers.current.get(contactId);
+    if (controller) {
+      controller.abort();
+      transcriptionControllers.current.delete(contactId);
+    }
+    
+    // Remove from active transcriptions
+    setActiveTranscriptions(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(contactId);
+      return newSet;
+    });
+  }, []);
+
+  // FIXED: Cleanup all transcriptions on unmount
+  useEffect(() => {
+    return () => {
+      // Cleanup all intervals and controllers
+      progressIntervals.current.forEach(interval => clearInterval(interval));
+      transcriptionControllers.current.forEach(controller => controller.abort());
+      progressIntervals.current.clear();
+      transcriptionControllers.current.clear();
+    };
+  }, []);
 
   // Handle sorting
   const handleSort = (field: SortField) => {
@@ -219,13 +258,10 @@ const CallLogDisplay = ({
   }, [selectedAgent, sortField, sortDirection]);
 
   // Function to categorise transcript
-  // TODO: Fix Typing
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const categorizeTranscript = async (transcriptionData: any) => {
     try {
       console.log("Starting topic categorization...");
       
-      // Use the correct API endpoint that matches your route
       const response = await fetch("/api/openAI/categorise", {
         method: "POST",
         headers: {
@@ -252,7 +288,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // Function to get transcription status component
+  // FIXED: Function to get transcription status component with better error handling
   const getTranscriptionStatus = (log: CallLog) => {
     if (checkSupabase && log.existsInSupabase) {
       return (
@@ -261,7 +297,7 @@ const CallLogDisplay = ({
           Transcribed
         </span>
       );
-    } else if (activeTranscriptions.includes(log.contact_id)) {
+    } else if (activeTranscriptions.has(log.contact_id)) {
       return (
         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
           <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
@@ -271,10 +307,20 @@ const CallLogDisplay = ({
           )}
         </span>
       );
+    } else if (log.transcriptionStatus === "Failed") {
+      return (
+        <span 
+          className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800 cursor-help"
+          title={log.transcriptionError || "Transcription failed"}
+        >
+          <div className="w-2 h-2 bg-red-500 rounded-full mr-1"></div>
+          Failed
+        </span>
+      );
     } else {
       return (
-        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-          <div className="w-2 h-2 bg-red-500 rounded-full mr-1"></div>
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          <div className="w-2 h-2 bg-gray-500 rounded-full mr-1"></div>
           Pending
         </span>
       );
@@ -282,7 +328,6 @@ const CallLogDisplay = ({
   };
 
   // Function to save transcription data to Supabase
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const saveToSupabase = async (log: CallLog, transcriptionData: any, categorization: any = null) => {
     try {
       console.log(
@@ -314,7 +359,6 @@ const CallLogDisplay = ({
         total_hold_time: log.total_hold_time,
         time_in_queue: log.time_in_queue,
         call_duration: log.total_call_time,
-        // Updated categorization mapping
         categories: categorization?.topic_categories 
           ? JSON.stringify(categorization.topic_categories) 
           : (transcriptionData.topic_categorization?.all_topics ? JSON.stringify(transcriptionData.topic_categorization.all_topics) : null),
@@ -351,36 +395,66 @@ const CallLogDisplay = ({
     }
   };
 
-  // Function to initiate transcription for a specific log
+  // FIXED: Improved transcription function with better error handling and resource management
   const initiateTranscription = useCallback(async (log: CallLog) => {
     if (!log.recording_location) return false;
 
+    const contactId = log.contact_id;
+    
+    // Create abort controller for this transcription
+    const controller = new AbortController();
+    transcriptionControllers.current.set(contactId, controller);
+
     try {
-      console.log(`Starting transcription for ${log.contact_id}`);
+      console.log(`Starting transcription for ${contactId}`);
+      
       // Update log status to pending
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
-          l.contact_id === log.contact_id
+          l.contact_id === contactId
             ? {
                 ...l,
                 transcriptionStatus: "Pending Transcription",
                 transcriptionProgress: 0,
+                transcriptionError: undefined,
               }
             : l
         )
       );
 
-      // Extract the filename from recording_location
+      // FIXED: Validate recording location format
       const fullPath = log.recording_location;
-      const filename = fullPath.split("/").pop();
+      if (!fullPath || typeof fullPath !== 'string') {
+        throw new Error("Invalid recording location");
+      }
 
+      const filename = fullPath.split("/").pop();
       if (!filename) {
         throw new Error("Could not extract filename from recording location");
       }
 
       console.log(`Extracted filename: ${filename} from path: ${fullPath}`);
 
-      // Start the transcription process
+      // FIXED: Set up progress updates with proper cleanup
+      const progressInterval = setInterval(() => {
+        setCallLogs((prevLogs) =>
+          prevLogs.map((l) => {
+            if (
+              l.contact_id === contactId &&
+              l.transcriptionStatus === "Pending Transcription"
+            ) {
+              const currentProgress = l.transcriptionProgress || 0;
+              const newProgress = Math.min(85, currentProgress + 2); // More conservative progress
+              return { ...l, transcriptionProgress: newProgress };
+            }
+            return l;
+          })
+        );
+      }, 2000); // Slower progress updates
+
+      progressIntervals.current.set(contactId, progressInterval);
+
+      // FIXED: Make transcription request with timeout and abort signal
       const response = await fetch("/api/transcribe", {
         method: "POST",
         headers: {
@@ -392,17 +466,17 @@ const CallLogDisplay = ({
           filename: filename,
           speakerCount: 2,
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
         const errorData = await response.json();
         console.error("Transcription failed:", errorData);
-        throw new Error(errorData.error || "Transcription failed");
+        throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
       }
 
-      // Get the transcription data from the response
       const transcriptionData = await response.json();
-      console.log(`Transcription API response for ${log.contact_id}:`, transcriptionData);
+      console.log(`Transcription API response for ${contactId}:`, transcriptionData);
 
       // Check if transcription was actually successful
       const hasValidTranscript = transcriptionData && 
@@ -411,9 +485,8 @@ const CallLogDisplay = ({
         transcriptionData.text.trim().length > 0;
 
       if (!hasValidTranscript) {
-        console.warn(`Transcription returned no valid content for ${log.contact_id}:`, transcriptionData);
+        console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
         
-        // Still try to save basic call log info even without transcript
         const basicData = {
           text: transcriptionData?.text || "",
           utterances: transcriptionData?.utterances || [],
@@ -423,13 +496,11 @@ const CallLogDisplay = ({
           topic_categorization: transcriptionData?.topic_categorization || null
         };
 
-        // Save basic info to Supabase without additional categorization
         const supabaseSaved = await saveToSupabase(log, basicData, null);
 
-        // Update log status
         setCallLogs((prevLogs) =>
           prevLogs.map((l) =>
-            l.contact_id === log.contact_id
+            l.contact_id === contactId
               ? {
                   ...l,
                   transcriptionStatus: "Transcribed",
@@ -443,43 +514,43 @@ const CallLogDisplay = ({
         return supabaseSaved;
       }
 
-      console.log(`Valid transcription completed for ${log.contact_id}`);
+      console.log(`Valid transcription completed for ${contactId}`);
 
-      // Check if categorization was already done by the transcribe API
+      // Handle categorization
       let categorization = null;
       if (transcriptionData.topic_categorization) {
-        console.log(`Using categorization from transcribe API for ${log.contact_id}:`, transcriptionData.topic_categorization);
+        console.log(`Using categorization from transcribe API for ${contactId}:`, transcriptionData.topic_categorization);
         categorization = {
           topic_categories: transcriptionData.topic_categorization.all_topics,
           primary_category: transcriptionData.topic_categorization.primary_topic,
           confidence: transcriptionData.topic_categorization.confidence
         };
       } else if (transcriptionData.utterances && transcriptionData.utterances.length > 0) {
-        // Fallback: categorize if not already done
-        console.log(`Running additional categorization for ${log.contact_id}`);
+        console.log(`Running additional categorization for ${contactId}`);
         categorization = await categorizeTranscript(transcriptionData);
         
         if (categorization) {
-          console.log(`Additional categorization completed for ${log.contact_id}:`, categorization);
+          console.log(`Additional categorization completed for ${contactId}:`, categorization);
         } else {
-          console.log(`Additional categorization failed for ${log.contact_id}, proceeding without categories`);
+          console.log(`Additional categorization failed for ${contactId}, proceeding without categories`);
         }
       } else {
-        console.log(`Skipping categorization for ${log.contact_id} - no utterances found`);
+        console.log(`Skipping categorization for ${contactId} - no utterances found`);
       }
 
-      // Save transcription data to Supabase (with categorization if available)
+      // Save transcription data to Supabase
       const supabaseSaved = await saveToSupabase(log, transcriptionData, categorization);
 
-      // Update log status to transcribed and mark as existing in Supabase
+      // Update log status to transcribed
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
-          l.contact_id === log.contact_id
+          l.contact_id === contactId
             ? {
                 ...l,
                 transcriptionStatus: "Transcribed",
                 transcriptionProgress: 100,
-                existsInSupabase: supabaseSaved, // Update based on whether save was successful
+                existsInSupabase: supabaseSaved,
+                transcriptionError: undefined,
               }
             : l
         )
@@ -487,100 +558,92 @@ const CallLogDisplay = ({
 
       return true;
     } catch (error) {
-      console.error(`Error transcribing ${log.contact_id}:`, error);
+      console.error(`Error transcribing ${contactId}:`, error);
 
-      // Reset status to Pending Transcription on error
+      // FIXED: Better error handling and status updates
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
-          l.contact_id === log.contact_id
+          l.contact_id === contactId
             ? {
                 ...l,
-                transcriptionStatus: "Pending Transcription",
+                transcriptionStatus: "Failed",
                 transcriptionProgress: undefined,
+                transcriptionError: errorMessage,
               }
             : l
         )
       );
 
+      // Add to failed transcriptions set
+      setFailedTranscriptions(prev => new Set(prev).add(contactId));
+
       return false;
     } finally {
-      // Remove this log from active transcriptions when done
-      setActiveTranscriptions((prev) =>
-        prev.filter((id) => id !== log.contact_id)
-      );
+      // FIXED: Always cleanup resources
+      cleanupTranscription(contactId);
     }
-  }, []);
+  }, [cleanupTranscription]);
 
-  // Add log to transcription queue
+  // FIXED: Add log to transcription queue with duplicate prevention
   const queueTranscription = useCallback((logId: string) => {
     setTranscriptionQueue((prev) => {
-      // Don't add if already in queue or active
-      if (prev.includes(logId)) return prev;
+      // Don't add if already in queue, active, or failed
+      if (prev.includes(logId) || 
+          activeTranscriptions.has(logId) || 
+          failedTranscriptions.has(logId)) {
+        return prev;
+      }
       return [...prev, logId];
     });
-  }, []);
+  }, [activeTranscriptions, failedTranscriptions]);
 
-  // Process transcription queue
+  // FIXED: Improved queue processing with better concurrency control
   useEffect(() => {
     const processQueue = async () => {
-      // If queue is empty or we've reached max concurrent transcriptions, do nothing
       if (transcriptionQueue.length === 0) return;
 
-      // Calculate how many more transcriptions we can start
-      const availableSlots =
-        maxConcurrentTranscriptions - activeTranscriptions.length;
-
+      const availableSlots = maxConcurrentTranscriptions - activeTranscriptions.size;
       if (availableSlots <= 0) return;
 
-      // Take the first N items from the queue (up to availableSlots)
+      // Take only the first N items from the queue
       const logsToProcess = transcriptionQueue.slice(0, availableSlots);
 
-      // Move these logs from queue to active transcriptions
+      // Remove these logs from queue and add to active
       setTranscriptionQueue((prev) =>
         prev.filter((id) => !logsToProcess.includes(id))
       );
-      setActiveTranscriptions((prev) => [...prev, ...logsToProcess]);
+      
+      setActiveTranscriptions((prev) => {
+        const newSet = new Set(prev);
+        logsToProcess.forEach(id => newSet.add(id));
+        return newSet;
+      });
 
-      // Process each log concurrently
-      logsToProcess.forEach(async (logId) => {
-        // Find the log in our call logs
-        const logToTranscribe = callLogs.find(
-          (log) => log.contact_id === logId
-        );
+      // FIXED: Process each log with proper async handling
+      const transcriptionPromises = logsToProcess.map(async (logId) => {
+        const logToTranscribe = callLogs.find(log => log.contact_id === logId);
 
         if (!logToTranscribe || !logToTranscribe.recording_location) {
-          // Remove invalid logs from active transcriptions
-          setActiveTranscriptions((prev) => prev.filter((id) => id !== logId));
+          console.error(`Invalid log for transcription: ${logId}`);
+          setActiveTranscriptions(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(logId);
+            return newSet;
+          });
           return;
         }
 
-        // Set up progress updates for this log - REDUCED INTERVAL FOR BETTER UX WITH 5 CONCURRENT
-        const progressInterval = setInterval(() => {
-          setCallLogs((prevLogs) =>
-            prevLogs.map((l) => {
-              if (
-                l.contact_id === logId &&
-                l.transcriptionStatus === "Pending Transcription"
-              ) {
-                // Increment progress by 3% until we reach 90% (real completion will set it to 100%)
-                const currentProgress = l.transcriptionProgress || 0;
-                const newProgress = Math.min(90, currentProgress + 3);
-                return { ...l, transcriptionProgress: newProgress };
-              }
-              return l;
-            })
-          );
-        }, 1500); // REDUCED FROM 2000ms TO 1500ms FOR SMOOTHER PROGRESS WITH MULTIPLE CONCURRENT
-
         try {
-          // Start transcription
           await initiateTranscription(logToTranscribe);
         } catch (error) {
           console.error(`Error processing queue item ${logId}:`, error);
-        } finally {
-          clearInterval(progressInterval);
         }
       });
+
+      // Wait for all transcriptions to complete
+      await Promise.allSettled(transcriptionPromises);
     };
 
     processQueue();
@@ -611,7 +674,6 @@ const CallLogDisplay = ({
         const data = await response.json();
 
         if (data.success) {
-          // Set transcription status based on existsInSupabase
           const logsWithTranscriptionStatus = data.data.map((log: CallLog) => ({
             ...log,
             transcriptionStatus: log.existsInSupabase
@@ -620,6 +682,17 @@ const CallLogDisplay = ({
           }));
 
           setCallLogs(logsWithTranscriptionStatus);
+          
+          // FIXED: Reset transcription state when new data is loaded
+          setTranscriptionQueue([]);
+          setActiveTranscriptions(new Set());
+          setFailedTranscriptions(new Set());
+          
+          // Clear any existing intervals and controllers
+          progressIntervals.current.forEach(interval => clearInterval(interval));
+          transcriptionControllers.current.forEach(controller => controller.abort());
+          progressIntervals.current.clear();
+          transcriptionControllers.current.clear();
         } else {
           setError(data.error || "Failed to fetch call logs");
         }
@@ -634,30 +707,26 @@ const CallLogDisplay = ({
     fetchCallLogs();
   }, [selectedDateRange, checkSupabase]);
 
-  // Auto-queue logs that need transcription when logs are loaded - INCREASED AUTO-QUEUE LIMIT
+  // FIXED: Auto-queue logs with better logic and limits
   useEffect(() => {
     if (!loading && callLogs.length > 0) {
-      // INCREASED from 10 to 20 to better handle 5 concurrent transcriptions
-      const maxAutoQueue = 20;
+      const maxAutoQueue = 15; // Reasonable limit
       let queued = 0;
 
-      if (
-        transcriptionQueue.length + activeTranscriptions.length <
-        maxAutoQueue
-      ) {
+      const totalInProgress = transcriptionQueue.length + activeTranscriptions.size;
+      
+      if (totalInProgress < maxAutoQueue) {
         paginatedCallLogs.forEach((log) => {
           if (
             log.recording_location &&
             log.transcriptionStatus === "Pending Transcription" &&
-            log.existsInSupabase === false && // Only auto-queue if NOT in Supabase
-            queued <
-              maxAutoQueue -
-                transcriptionQueue.length -
-                activeTranscriptions.length
+            log.existsInSupabase === false &&
+            !transcriptionQueue.includes(log.contact_id) &&
+            !activeTranscriptions.has(log.contact_id) &&
+            !failedTranscriptions.has(log.contact_id) &&
+            queued < (maxAutoQueue - totalInProgress)
           ) {
-            console.log(
-              `Auto-queueing transcription for call ${log.contact_id} (not in Supabase)`
-            );
+            console.log(`Auto-queueing transcription for call ${log.contact_id}`);
             queueTranscription(log.contact_id);
             queued++;
           }
@@ -668,8 +737,9 @@ const CallLogDisplay = ({
     paginatedCallLogs,
     loading,
     queueTranscription,
-    transcriptionQueue.length,
-    activeTranscriptions.length,
+    transcriptionQueue,
+    activeTranscriptions,
+    failedTranscriptions,
   ]);
 
   const formatTimestamp = (timestamp: string) => {
@@ -689,6 +759,33 @@ const CallLogDisplay = ({
     if (sortField !== field) return '↕️';
     return sortDirection === 'asc' ? '↑' : '↓';
   };
+
+  // FIXED: Manual retry function for failed transcriptions
+  const retryTranscription = useCallback((contactId: string) => {
+    // Remove from failed set and add to queue
+    setFailedTranscriptions(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(contactId);
+      return newSet;
+    });
+    
+    // Reset the log status
+    setCallLogs(prevLogs =>
+      prevLogs.map(l =>
+        l.contact_id === contactId
+          ? {
+              ...l,
+              transcriptionStatus: "Pending Transcription",
+              transcriptionProgress: 0,
+              transcriptionError: undefined,
+            }
+          : l
+      )
+    );
+    
+    // Queue for retry
+    queueTranscription(contactId);
+  }, [queueTranscription]);
 
   return (
     <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
@@ -737,11 +834,14 @@ const CallLogDisplay = ({
             </div>
           )}
 
-          {/* Queue status indicator for 5 concurrent */}
-          {(transcriptionQueue.length > 0 || activeTranscriptions.length > 0) && (
+          {/* FIXED: Enhanced queue status indicator */}
+          {(transcriptionQueue.length > 0 || activeTranscriptions.size > 0 || failedTranscriptions.size > 0) && (
             <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
               <div className="text-sm text-[#4ecca3] font-medium">
-                Processing transcriptions: {activeTranscriptions.length} active, {transcriptionQueue.length} queued
+                Transcription Status: {activeTranscriptions.size} active, {transcriptionQueue.length} queued
+                {failedTranscriptions.size > 0 && (
+                  <span className="text-red-400 ml-2">({failedTranscriptions.size} failed)</span>
+                )}
               </div>
             </div>
           )}
@@ -889,6 +989,17 @@ const CallLogDisplay = ({
                                 >
                                   View Details
                                 </Link>
+                                
+                                {/* FIXED: Add retry button for failed transcriptions */}
+                                {log.transcriptionStatus === "Failed" && (
+                                  <button
+                                    onClick={() => retryTranscription(log.contact_id)}
+                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors"
+                                    title="Retry transcription"
+                                  >
+                                    Retry
+                                  </button>
+                                )}
                                 
                                 {/* Audio Download Button */}
                                 {log.recording_location && (

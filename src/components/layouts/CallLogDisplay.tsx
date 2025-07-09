@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
@@ -395,153 +396,124 @@ const CallLogDisplay = ({
     }
   };
 
-  // FIXED: Improved transcription function with better error handling and resource management
   const initiateTranscription = useCallback(async (log: CallLog) => {
-    if (!log.recording_location) return false;
+  if (!log.recording_location) return false;
 
-    const contactId = log.contact_id;
+  const contactId = log.contact_id;
+  
+  // Create abort controller for this transcription
+  const controller = new AbortController();
+  transcriptionControllers.current.set(contactId, controller);
+
+  try {
+    console.log(`Starting transcription for ${contactId}`);
     
-    // Create abort controller for this transcription
-    const controller = new AbortController();
-    transcriptionControllers.current.set(contactId, controller);
-
-    try {
-      console.log(`Starting transcription for ${contactId}`);
-      
-      // Update log status to pending
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Pending Transcription",
-                transcriptionProgress: 0,
-                transcriptionError: undefined,
-              }
-            : l
-        )
-      );
-
-      // FIXED: Validate recording location format
-      const fullPath = log.recording_location;
-      if (!fullPath || typeof fullPath !== 'string') {
-        throw new Error("Invalid recording location");
-      }
-
-      const filename = fullPath.split("/").pop();
-      if (!filename) {
-        throw new Error("Could not extract filename from recording location");
-      }
-
-      console.log(`Extracted filename: ${filename} from path: ${fullPath}`);
-
-      // FIXED: Set up progress updates with proper cleanup
-      const progressInterval = setInterval(() => {
-        setCallLogs((prevLogs) =>
-          prevLogs.map((l) => {
-            if (
-              l.contact_id === contactId &&
-              l.transcriptionStatus === "Pending Transcription"
-            ) {
-              const currentProgress = l.transcriptionProgress || 0;
-              const newProgress = Math.min(85, currentProgress + 2); // More conservative progress
-              return { ...l, transcriptionProgress: newProgress };
+    // Update log status to pending
+    setCallLogs((prevLogs) =>
+      prevLogs.map((l) =>
+        l.contact_id === contactId
+          ? {
+              ...l,
+              transcriptionStatus: "Pending Transcription",
+              transcriptionProgress: 0,
+              transcriptionError: undefined,
             }
-            return l;
-          })
-        );
-      }, 2000); // Slower progress updates
+          : l
+      )
+    );
 
-      progressIntervals.current.set(contactId, progressInterval);
+    // Validate recording location format
+    const fullPath = log.recording_location;
+    if (!fullPath || typeof fullPath !== 'string') {
+      throw new Error("Invalid recording location");
+    }
 
-      // FIXED: Make transcription request with timeout and abort signal
-      const response = await fetch("/api/transcribe", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+    const filename = fullPath.split("/").pop();
+    if (!filename) {
+      throw new Error("Could not extract filename from recording location");
+    }
+
+    console.log(`Processing file: ${filename} from path: ${fullPath}`);
+
+    // Set up progress updates with proper cleanup
+    const progressInterval = setInterval(() => {
+      setCallLogs((prevLogs) =>
+        prevLogs.map((l) => {
+          if (
+            l.contact_id === contactId &&
+            l.transcriptionStatus === "Pending Transcription"
+          ) {
+            const currentProgress = l.transcriptionProgress || 0;
+            const newProgress = Math.min(85, currentProgress + 2);
+            return { ...l, transcriptionProgress: newProgress };
+          }
+          return l;
+        })
+      );
+    }, 2000);
+
+    progressIntervals.current.set(contactId, progressInterval);
+
+    // UPDATED: Pass complete call data to the transcription API
+    const response = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        isDirectSftpFile: true,
+        sftpFilename: fullPath,
+        filename: filename,
+        speakerCount: 2,
+        // ADDED: Pass the complete call log data
+        callData: {
+          contact_id: log.contact_id,
+          agent_username: log.agent_username,
+          recording_location: log.recording_location,
+          initiation_timestamp: log.initiation_timestamp,
+          total_call_time: log.total_call_time,
+          campaign_name: log.campaign_name,
+          campaign_id: log.campaign_id,
+          customer_cli: log.customer_cli,
+          agent_hold_time: log.agent_hold_time,
+          total_hold_time: log.total_hold_time,
+          time_in_queue: log.time_in_queue,
+          queue_name: log.queue_name,
+          disposition_title: log.disposition_title,
         },
-        body: JSON.stringify({
-          isDirectSftpFile: true,
-          sftpFilename: fullPath,
-          filename: filename,
-          speakerCount: 2,
-        }),
-        signal: controller.signal,
-      });
+      }),
+      signal: controller.signal,
+    });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Transcription failed:", errorData);
-        throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
-      }
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("Transcription failed:", errorData);
+      throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
+    }
 
-      const transcriptionData = await response.json();
-      console.log(`Transcription API response for ${contactId}:`, transcriptionData);
+    const transcriptionData = await response.json();
+    console.log(`Transcription API response for ${contactId}:`, transcriptionData);
 
-      // Check if transcription was actually successful
-      const hasValidTranscript = transcriptionData && 
-        transcriptionData.status !== "unavailable" && 
-        transcriptionData.text && 
-        transcriptionData.text.trim().length > 0;
+    // Check if transcription was actually successful
+    const hasValidTranscript = transcriptionData && 
+      transcriptionData.status === "completed" &&
+      transcriptionData.text && 
+      transcriptionData.text.trim().length > 0;
 
-      if (!hasValidTranscript) {
-        console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
-        
-        const basicData = {
-          text: transcriptionData?.text || "",
-          utterances: transcriptionData?.utterances || [],
-          summary: transcriptionData?.summary || null,
-          sentiment_analysis_results: transcriptionData?.sentiment_analysis_results || null,
-          entities: transcriptionData?.entities || null,
-          topic_categorization: transcriptionData?.topic_categorization || null
-        };
+    if (!hasValidTranscript) {
+      console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
+      
+      // Still try to save basic data if available
+      const basicData = {
+        text: transcriptionData?.text || "",
+        utterances: transcriptionData?.utterances || [],
+        summary: transcriptionData?.summary || null,
+        sentiment_analysis_results: transcriptionData?.sentiment_analysis_results || null,
+        entities: transcriptionData?.entities || null,
+        topic_categorization: transcriptionData?.topic_categorization || null
+      };
 
-        const supabaseSaved = await saveToSupabase(log, basicData, null);
-
-        setCallLogs((prevLogs) =>
-          prevLogs.map((l) =>
-            l.contact_id === contactId
-              ? {
-                  ...l,
-                  transcriptionStatus: "Transcribed",
-                  transcriptionProgress: 100,
-                  existsInSupabase: supabaseSaved,
-                }
-              : l
-          )
-        );
-
-        return supabaseSaved;
-      }
-
-      console.log(`Valid transcription completed for ${contactId}`);
-
-      // Handle categorization
-      let categorization = null;
-      if (transcriptionData.topic_categorization) {
-        console.log(`Using categorization from transcribe API for ${contactId}:`, transcriptionData.topic_categorization);
-        categorization = {
-          topic_categories: transcriptionData.topic_categorization.all_topics,
-          primary_category: transcriptionData.topic_categorization.primary_topic,
-          confidence: transcriptionData.topic_categorization.confidence
-        };
-      } else if (transcriptionData.utterances && transcriptionData.utterances.length > 0) {
-        console.log(`Running additional categorization for ${contactId}`);
-        categorization = await categorizeTranscript(transcriptionData);
-        
-        if (categorization) {
-          console.log(`Additional categorization completed for ${contactId}:`, categorization);
-        } else {
-          console.log(`Additional categorization failed for ${contactId}, proceeding without categories`);
-        }
-      } else {
-        console.log(`Skipping categorization for ${contactId} - no utterances found`);
-      }
-
-      // Save transcription data to Supabase
-      const supabaseSaved = await saveToSupabase(log, transcriptionData, categorization);
-
-      // Update log status to transcribed
+      // Note: Supabase saving is now handled by the API route
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
           l.contact_id === contactId
@@ -549,42 +521,60 @@ const CallLogDisplay = ({
                 ...l,
                 transcriptionStatus: "Transcribed",
                 transcriptionProgress: 100,
-                existsInSupabase: supabaseSaved,
-                transcriptionError: undefined,
+                existsInSupabase: true, // Assume saved since API handles it
               }
             : l
         )
       );
 
       return true;
-    } catch (error) {
-      console.error(`Error transcribing ${contactId}:`, error);
-
-      // FIXED: Better error handling and status updates
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Failed",
-                transcriptionProgress: undefined,
-                transcriptionError: errorMessage,
-              }
-            : l
-        )
-      );
-
-      // Add to failed transcriptions set
-      setFailedTranscriptions(prev => new Set(prev).add(contactId));
-
-      return false;
-    } finally {
-      // FIXED: Always cleanup resources
-      cleanupTranscription(contactId);
     }
-  }, [cleanupTranscription]);
+
+    console.log(`Valid transcription completed for ${contactId}`);
+
+    // Update log status to transcribed
+    setCallLogs((prevLogs) =>
+      prevLogs.map((l) =>
+        l.contact_id === contactId
+          ? {
+              ...l,
+              transcriptionStatus: "Transcribed",
+              transcriptionProgress: 100,
+              existsInSupabase: true, // API route handles Supabase saving
+              transcriptionError: undefined,
+            }
+          : l
+      )
+    );
+
+    return true;
+  } catch (error) {
+    console.error(`Error transcribing ${contactId}:`, error);
+
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    
+    setCallLogs((prevLogs) =>
+      prevLogs.map((l) =>
+        l.contact_id === contactId
+          ? {
+              ...l,
+              transcriptionStatus: "Failed",
+              transcriptionProgress: undefined,
+              transcriptionError: errorMessage,
+            }
+          : l
+      )
+    );
+
+    // Add to failed transcriptions set
+    setFailedTranscriptions(prev => new Set(prev).add(contactId));
+
+    return false;
+  } finally {
+    // Always cleanup resources
+    cleanupTranscription(contactId);
+  }
+}, [cleanupTranscription]);
 
   // FIXED: Add log to transcription queue with duplicate prevention
   const queueTranscription = useCallback((logId: string) => {

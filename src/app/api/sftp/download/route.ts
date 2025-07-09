@@ -1,3 +1,4 @@
+/* eslint-disable prefer-const */
 // app/api/sftp/download/route.ts
 
 import { Client } from "ssh2";
@@ -24,6 +25,60 @@ function getSftpConfig(): SftpConfig {
       path.resolve(process.env.HOME || "~", ".ssh/sftp_key")
     ),
     passphrase: process.env.SFTP_PASSPHRASE!,
+  };
+}
+
+// Helper function to validate audio file format
+function validateAudioBuffer(buffer: Buffer): { isValid: boolean; fileType: string; details: string } {
+  if (buffer.length < 12) {
+    return { isValid: false, fileType: "unknown", details: "File too small to be valid audio" };
+  }
+
+  // Check for WAV format (RIFF container with WAVE format)
+  const riffHeader = buffer.subarray(0, 4).toString('ascii');
+  const waveHeader = buffer.subarray(8, 12).toString('ascii');
+  
+  if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
+    return { isValid: true, fileType: "audio/wav", details: "Valid WAV file" };
+  }
+
+  // Check for MP3 format
+  if (buffer.length >= 3) {
+    // MP3 files can start with ID3 tags or direct audio frames
+    const id3Header = buffer.subarray(0, 3).toString('ascii');
+    if (id3Header === 'ID3') {
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file with ID3 tags" };
+    }
+    
+    // Check for MP3 frame sync (0xFF followed by 0xFB, 0xFA, or 0xF3, 0xF2)
+    if (buffer[0] === 0xFF && (buffer[1] & 0xE0) === 0xE0) {
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file" };
+    }
+  }
+
+  // Check for OGG format
+  if (buffer.length >= 4) {
+    const oggHeader = buffer.subarray(0, 4).toString('ascii');
+    if (oggHeader === 'OggS') {
+      return { isValid: true, fileType: "audio/ogg", details: "Valid OGG file" };
+    }
+  }
+
+  // Check for M4A/AAC format
+  if (buffer.length >= 8) {
+    const m4aHeader = buffer.subarray(4, 8).toString('ascii');
+    if (m4aHeader === 'ftyp') {
+      return { isValid: true, fileType: "audio/mp4", details: "Valid M4A/MP4 audio file" };
+    }
+  }
+
+  // If we get here, it's not a recognized audio format
+  const firstBytes = buffer.subarray(0, 16).toString('hex');
+  const textContent = buffer.subarray(0, 100).toString('ascii').replace(/[^\x20-\x7E]/g, '.');
+  return { 
+    isValid: false, 
+    fileType: "application/octet-stream", 
+    details: `Unrecognized audio format. First 16 bytes: ${firstBytes}. Text content: "${textContent}"`
   };
 }
 
@@ -189,12 +244,33 @@ export async function GET(request: Request) {
               return;
             }
 
+            if (stats.size < 1000) {
+              console.log(`⚠️ File at path ${pathIndex + 1} is too small (${stats.size} bytes), trying next path`);
+              pathIndex++;
+              tryNextPath();
+              return;
+            }
+
             // File exists and has content, now download it
+            console.log(`📥 Starting download of ${stats.size} bytes from: ${currentPath}`);
+            
             const fileBuffer: Buffer[] = [];
+            let totalBytesReceived = 0;
+            let downloadStartTime = Date.now();
+            
             const readStream = sftp.createReadStream(currentPath);
+
+            // Set up download timeout
+            const downloadTimeout = setTimeout(() => {
+              console.error(`⏰ Download timeout for ${currentPath}`);
+              readStream.destroy();
+              pathIndex++;
+              tryNextPath();
+            }, 60000); // 60 second download timeout
 
             readStream.on("error", (readErr: Error) => {
               console.log(`❌ Read stream error for path ${pathIndex + 1}: ${readErr.message}`);
+              clearTimeout(downloadTimeout);
               pathIndex++;
               tryNextPath();
             });
@@ -204,56 +280,97 @@ export async function GET(request: Request) {
                 fileFound = true;
                 console.log(`✅ Audio file found and downloading from: ${currentPath}`);
               }
+              
               fileBuffer.push(chunk);
-              console.log(`📦 Downloaded chunk: ${chunk.length} bytes (total: ${Buffer.concat(fileBuffer).length} bytes)`);
+              totalBytesReceived += chunk.length;
+              
+              // Log progress every 1MB or 10% of file size, whichever is smaller
+              const progressInterval = Math.min(1024 * 1024, Math.floor(stats.size / 10));
+              if (totalBytesReceived % progressInterval < chunk.length) {
+                const progress = ((totalBytesReceived / stats.size) * 100).toFixed(1);
+                console.log(`📦 Download progress: ${totalBytesReceived}/${stats.size} bytes (${progress}%)`);
+              }
             });
 
             readStream.on("end", () => {
+              clearTimeout(downloadTimeout);
+              
               const audioBuffer = Buffer.concat(fileBuffer);
-              console.log(`✅ Audio download complete: ${audioBuffer.length} bytes from ${currentPath}`);
+              const downloadTime = Date.now() - downloadStartTime;
+              
+              console.log(`✅ Audio download complete: ${audioBuffer.length} bytes from ${currentPath} in ${downloadTime}ms`);
+              
+              // Verify we got the expected amount of data
+              if (audioBuffer.length !== stats.size) {
+                console.error(`❌ Downloaded size mismatch! Expected: ${stats.size}, Got: ${audioBuffer.length}`);
+                pathIndex++;
+                tryNextPath();
+                return;
+              }
               
               if (audioBuffer.length === 0) {
                 console.error("❌ Downloaded audio buffer is empty");
+                pathIndex++;
+                tryNextPath();
+                return;
+              }
+
+              // Validate the audio file format
+              const validation = validateAudioBuffer(audioBuffer);
+              console.log(`🔍 Audio validation result:`, validation);
+
+              if (!validation.isValid) {
+                console.error(`❌ Invalid audio file format: ${validation.details}`);
+                console.error(`🔍 File appears to be: ${validation.fileType}`);
+                
+                // Log more details for debugging
+                const firstBytes = audioBuffer.subarray(0, 32).toString('hex');
+                const textContent = audioBuffer.subarray(0, 200).toString('ascii').replace(/[^\x20-\x7E]/g, '.');
+                console.error(`🔍 First 32 bytes (hex): ${firstBytes}`);
+                console.error(`🔍 First 200 bytes (text): "${textContent}"`);
+                
                 if (!resolved) {
                   resolved = true;
-                  reject(NextResponse.json({ error: "Downloaded audio file is empty" }, { status: 500 }));
+                  reject(NextResponse.json({ 
+                    error: "Invalid audio file format", 
+                    details: validation.details,
+                    fileType: validation.fileType,
+                    actualContent: textContent.substring(0, 100)
+                  }, { status: 400 }));
                 }
                 conn.end();
                 return;
               }
 
-              // Validate that this looks like a WAV file
-              const isWavFile = audioBuffer.length >= 12 && 
-                              audioBuffer.subarray(0, 4).toString() === 'RIFF' &&
-                              audioBuffer.subarray(8, 12).toString() === 'WAVE';
-              
-              if (!isWavFile) {
-                console.warn("⚠️ File doesn't appear to be a WAV file based on header check");
-                console.log(`🔍 File header: ${audioBuffer.subarray(0, 16).toString('hex')}`);
-              } else {
-                console.log("✅ WAV file header validation passed");
-              }
+              console.log(`✅ Valid audio file confirmed: ${validation.details}`);
 
               // Extract just the filename for the download header
               const downloadFilename = filename.split('/').pop() || filename;
               
               if (!resolved) {
                 resolved = true;
-                // Return the audio file with proper headers for WAV
+                // Return the audio file with proper headers based on detected format
+                const mimeType = validation.fileType;
                 resolve(
                   new NextResponse(audioBuffer, {
                     status: 200,
                     headers: {
-                      "Content-Type": "audio/wav",
+                      "Content-Type": mimeType,
                       "Content-Length": audioBuffer.length.toString(),
                       "Content-Disposition": `attachment; filename="${downloadFilename}"`,
                       "Cache-Control": "no-cache",
+                      "X-Audio-Format": validation.details,
+                      "X-File-Size": audioBuffer.length.toString(),
                     },
                   })
                 );
               }
               
               conn.end();
+            });
+
+            readStream.on("close", () => {
+              console.log(`🔐 Read stream closed for ${currentPath}`);
             });
           });
         };

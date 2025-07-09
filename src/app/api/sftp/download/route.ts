@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable prefer-const */
 // app/api/sftp/download/route.ts
 
@@ -28,86 +29,69 @@ function getSftpConfig(): SftpConfig {
   };
 }
 
-// Helper function to validate audio file format
-function validateAudioBuffer(buffer: Buffer): { isValid: boolean; fileType: string; details: string } {
-  if (buffer.length < 12) {
-    return { isValid: false, fileType: "unknown", details: "File too small to be valid audio" };
+// Simplified audio validation - less strict to avoid false rejections
+function getAudioMimeType(buffer: Buffer, filename: string): string {
+  // Get MIME type from file extension first
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const extensionMimeTypes: Record<string, string> = {
+    'wav': 'audio/wav',
+    'mp3': 'audio/mpeg',
+    'flac': 'audio/flac',
+    'm4a': 'audio/mp4',
+    'aac': 'audio/aac',
+    'ogg': 'audio/ogg',
+    'wma': 'audio/x-ms-wma',
+  };
+
+  // If we have a known audio extension, use it
+  if (extensionMimeTypes[ext]) {
+    console.log(`🎵 Using MIME type from extension: ${ext} -> ${extensionMimeTypes[ext]}`);
+    return extensionMimeTypes[ext];
   }
 
-  // Check for WAV format (RIFF container with WAVE format)
-  const riffHeader = buffer.subarray(0, 4).toString('ascii');
-  const waveHeader = buffer.subarray(8, 12).toString('ascii');
-  
-  if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
-    return { isValid: true, fileType: "audio/wav", details: "Valid WAV file" };
+  // Fallback to buffer detection for common formats
+  if (buffer.length >= 12) {
+    // Check for WAV
+    const riffHeader = buffer.subarray(0, 4).toString('ascii');
+    const waveHeader = buffer.subarray(8, 12).toString('ascii');
+    if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
+      console.log(`🎵 Detected WAV from buffer`);
+      return 'audio/wav';
+    }
   }
 
-  // Check for MP3 format
   if (buffer.length >= 3) {
-    // MP3 files can start with ID3 tags or direct audio frames
+    // Check for MP3
     const id3Header = buffer.subarray(0, 3).toString('ascii');
-    if (id3Header === 'ID3') {
-      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file with ID3 tags" };
-    }
-    
-    // Check for MP3 frame sync (0xFF followed by 0xFB, 0xFA, or 0xF3, 0xF2)
-    if (buffer[0] === 0xFF && (buffer[1] & 0xE0) === 0xE0) {
-      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file" };
+    if (id3Header === 'ID3' || (buffer[0] === 0xFF && (buffer[1] & 0xE0) === 0xE0)) {
+      console.log(`🎵 Detected MP3 from buffer`);
+      return 'audio/mpeg';
     }
   }
 
-  // Check for OGG format
   if (buffer.length >= 4) {
+    // Check for OGG
     const oggHeader = buffer.subarray(0, 4).toString('ascii');
     if (oggHeader === 'OggS') {
-      return { isValid: true, fileType: "audio/ogg", details: "Valid OGG file" };
+      console.log(`🎵 Detected OGG from buffer`);
+      return 'audio/ogg';
     }
   }
 
-  // Check for M4A/AAC format
-  if (buffer.length >= 8) {
-    const m4aHeader = buffer.subarray(4, 8).toString('ascii');
-    if (m4aHeader === 'ftyp') {
-      return { isValid: true, fileType: "audio/mp4", details: "Valid M4A/MP4 audio file" };
-    }
-  }
-
-  // If we get here, it's not a recognized audio format
-  const firstBytes = buffer.subarray(0, 16).toString('hex');
-  const textContent = buffer.subarray(0, 100).toString('ascii').replace(/[^\x20-\x7E]/g, '.');
-  return { 
-    isValid: false, 
-    fileType: "application/octet-stream", 
-    details: `Unrecognized audio format. First 16 bytes: ${firstBytes}. Text content: "${textContent}"`
-  };
+  // Default to audio/wav for unknown audio files instead of application/octet-stream
+  console.log(`🎵 Unknown format, defaulting to audio/wav`);
+  return 'audio/wav';
 }
 
-// Helper function to construct the proper SFTP path following ./YYYY/MM/DD/filename structure
+// Simplified path construction - try fewer, more likely paths
 function constructSftpPath(filename: string): string[] {
-  const currentDate = new Date();
-  const currentYear = currentDate.getFullYear();
-  const currentMonth = currentDate.getMonth() + 1;
-  const currentDay = currentDate.getDate();
-  
-  // Known prefixes that indicate a full path is already provided
-  const knownPrefixes = [
-    `./`,
-    `/`,
-    `${currentYear}/`,
-    `tsa-dialler/`,
-    `amazon-connect-b1a9c08821e5/tsa-dialler/`
-  ];
-  
-  const hasKnownPrefix = knownPrefixes.some(prefix => 
-    filename.startsWith(prefix)
-  );
-  
   const possiblePaths = [];
   
-  if (hasKnownPrefix) {
-    // Clean up the path if it has unwanted prefixes
+  // If filename already has path structure, use it directly
+  if (filename.includes('/') || filename.startsWith('./')) {
     let cleanPath = filename;
     
+    // Clean up known prefixes
     if (cleanPath.startsWith('amazon-connect-b1a9c08821e5/')) {
       cleanPath = cleanPath.replace('amazon-connect-b1a9c08821e5/', '');
     }
@@ -117,38 +101,38 @@ function constructSftpPath(filename: string): string[] {
     }
     
     possiblePaths.push(cleanPath);
-  } else {
-    // If no known prefix, try multiple date combinations
-    const justFilename = filename.split('/').pop() || filename;
-    
-    // Try current date first
-    possiblePaths.push(
-      `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${currentDay.toString().padStart(2, '0')}/${justFilename}`
-    );
-    
-    // Try a few days back in case file is from previous days
-    for (let daysBack = 1; daysBack <= 7; daysBack++) {
-      const pastDate = new Date(currentDate);
-      pastDate.setDate(currentDate.getDate() - daysBack);
-      
-      const year = pastDate.getFullYear();
-      const month = pastDate.getMonth() + 1;
-      const day = pastDate.getDate();
-      
-      possiblePaths.push(
-        `./${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
-      );
-    }
-    
-    // Try the current month but different days
-    for (let day = 1; day <= 31; day++) {
-      if (day !== currentDay) {
-        possiblePaths.push(
-          `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
-        );
-      }
-    }
   }
+  
+  // Try current date structure
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1;
+  const currentDay = currentDate.getDate();
+  
+  const justFilename = filename.split('/').pop() || filename;
+  
+  // Current date path
+  possiblePaths.push(
+    `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${currentDay.toString().padStart(2, '0')}/${justFilename}`
+  );
+  
+  // Try previous 3 days (most common case for recent files)
+  for (let daysBack = 1; daysBack <= 3; daysBack++) {
+    const pastDate = new Date(currentDate);
+    pastDate.setDate(currentDate.getDate() - daysBack);
+    
+    const year = pastDate.getFullYear();
+    const month = pastDate.getMonth() + 1;
+    const day = pastDate.getDate();
+    
+    possiblePaths.push(
+      `./${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
+    );
+  }
+  
+  // Try without date structure (direct file access)
+  possiblePaths.push(`./${justFilename}`);
+  possiblePaths.push(justFilename);
   
   return possiblePaths;
 }
@@ -165,6 +149,7 @@ export async function GET(request: Request) {
   }
 
   console.log(`🎵 SFTP audio download requested for: ${filename}`);
+  const requestStart = Date.now();
 
   // Get SFTP config
   let sftpConfig: SftpConfig;
@@ -182,18 +167,32 @@ export async function GET(request: Request) {
     const conn = new Client();
     let resolved = false;
 
-    // Connection timeout
+    // Overall request timeout - 2 minutes max
+    const overallTimeout = setTimeout(() => {
+      if (!resolved) {
+        console.error(`⏰ Overall request timeout after ${Date.now() - requestStart}ms`);
+        resolved = true;
+        conn.end();
+        resolve(NextResponse.json({ 
+          error: "Request timeout - file download took too long" 
+        }, { status: 504 }));
+      }
+    }, 120000); // 2 minutes
+
+    // Connection timeout - 30 seconds
     const connectionTimeout = setTimeout(() => {
       if (!resolved) {
         console.error("⏰ SFTP connection timeout");
         resolved = true;
         conn.end();
-        reject(NextResponse.json({ error: "Connection timeout" }, { status: 504 }));
+        resolve(NextResponse.json({ 
+          error: "SFTP connection timeout" 
+        }, { status: 504 }));
       }
     }, 30000);
 
     conn.on("ready", () => {
-      console.log("✅ SFTP connection ready for audio download");
+      console.log("✅ SFTP connection ready");
       clearTimeout(connectionTimeout);
 
       conn.sftp((err, sftp) => {
@@ -201,156 +200,138 @@ export async function GET(request: Request) {
           console.error("❌ SFTP session error:", err);
           if (!resolved) {
             resolved = true;
-            reject(NextResponse.json({ error: "SFTP session error" }, { status: 500 }));
+            clearTimeout(overallTimeout);
+            resolve(NextResponse.json({ 
+              error: "SFTP session error" 
+            }, { status: 500 }));
           }
           return;
         }
 
         const possiblePaths = constructSftpPath(filename);
-        console.log(`🔍 Trying ${possiblePaths.length} possible paths for audio file`);
+        console.log(`🔍 Trying ${possiblePaths.length} possible paths`);
         
         let pathIndex = 0;
-        let fileFound = false;
         
         const tryNextPath = () => {
           if (pathIndex >= possiblePaths.length) {
-            console.error(`❌ Audio file not found in any of the ${possiblePaths.length} attempted paths`);
+            console.error(`❌ File not found in any of ${possiblePaths.length} paths`);
             if (!resolved) {
               resolved = true;
-              reject(NextResponse.json({ error: "Audio file not found" }, { status: 404 }));
+              clearTimeout(overallTimeout);
+              resolve(NextResponse.json({ 
+                error: "Audio file not found",
+                searchedPaths: possiblePaths.length
+              }, { status: 404 }));
             }
             conn.end();
             return;
           }
           
           const currentPath = possiblePaths[pathIndex];
-          console.log(`🔍 Attempting audio path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
+          console.log(`🔍 Trying path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
           
-          // First check if file exists and get its stats
+          // Quick stat check
           sftp.stat(currentPath, (statErr, stats) => {
             if (statErr) {
-              console.log(`❌ Path ${pathIndex + 1} stat failed: ${statErr.message}`);
+              console.log(`❌ Path ${pathIndex + 1} not found`);
               pathIndex++;
               tryNextPath();
               return;
             }
 
-            console.log(`📊 File stats - Size: ${stats.size} bytes, Mode: ${stats.mode}`);
+            console.log(`📊 File found - Size: ${stats.size} bytes`);
             
+            // Basic size validation
             if (stats.size === 0) {
-              console.log(`⚠️ File at path ${pathIndex + 1} is empty, trying next path`);
+              console.log(`⚠️ Empty file, trying next path`);
               pathIndex++;
               tryNextPath();
               return;
             }
 
-            if (stats.size < 1000) {
-              console.log(`⚠️ File at path ${pathIndex + 1} is too small (${stats.size} bytes), trying next path`);
+            if (stats.size < 100) {
+              console.log(`⚠️ File too small (${stats.size} bytes), trying next path`);
               pathIndex++;
               tryNextPath();
               return;
             }
 
-            // File exists and has content, now download it
-            console.log(`📥 Starting download of ${stats.size} bytes from: ${currentPath}`);
+            // File looks good, download it
+            console.log(`📥 Downloading ${stats.size} bytes from: ${currentPath}`);
             
             const fileBuffer: Buffer[] = [];
             let totalBytesReceived = 0;
-            let downloadStartTime = Date.now();
+            const downloadStartTime = Date.now();
             
             const readStream = sftp.createReadStream(currentPath);
 
-            // Set up download timeout
+            // Download timeout based on file size (minimum 30s, max 90s)
+            const downloadTimeoutMs = Math.min(90000, Math.max(30000, stats.size / (1024 * 1024) * 10000)); // 10s per MB
             const downloadTimeout = setTimeout(() => {
-              console.error(`⏰ Download timeout for ${currentPath}`);
+              console.error(`⏰ Download timeout after ${downloadTimeoutMs}ms`);
               readStream.destroy();
-              pathIndex++;
-              tryNextPath();
-            }, 60000); // 60 second download timeout
+              if (!resolved) {
+                resolved = true;
+                clearTimeout(overallTimeout);
+                resolve(NextResponse.json({ 
+                  error: "Download timeout - file too large or connection slow" 
+                }, { status: 504 }));
+              }
+              conn.end();
+            }, downloadTimeoutMs);
 
             readStream.on("error", (readErr: Error) => {
-              console.log(`❌ Read stream error for path ${pathIndex + 1}: ${readErr.message}`);
+              console.log(`❌ Read error: ${readErr.message}`);
               clearTimeout(downloadTimeout);
               pathIndex++;
               tryNextPath();
             });
 
             readStream.on("data", (chunk: Buffer) => {
-              if (!fileFound) {
-                fileFound = true;
-                console.log(`✅ Audio file found and downloading from: ${currentPath}`);
-              }
-              
               fileBuffer.push(chunk);
               totalBytesReceived += chunk.length;
               
-              // Log progress every 1MB or 10% of file size, whichever is smaller
-              const progressInterval = Math.min(1024 * 1024, Math.floor(stats.size / 10));
-              if (totalBytesReceived % progressInterval < chunk.length) {
+              // Log progress for large files
+              if (stats.size > 5 * 1024 * 1024) { // 5MB+
                 const progress = ((totalBytesReceived / stats.size) * 100).toFixed(1);
-                console.log(`📦 Download progress: ${totalBytesReceived}/${stats.size} bytes (${progress}%)`);
+                if (totalBytesReceived % (1024 * 1024) < chunk.length) { // Every MB
+                  console.log(`📦 Progress: ${progress}%`);
+                }
               }
             });
 
             readStream.on("end", () => {
               clearTimeout(downloadTimeout);
+              clearTimeout(overallTimeout);
               
               const audioBuffer = Buffer.concat(fileBuffer);
               const downloadTime = Date.now() - downloadStartTime;
+              const totalTime = Date.now() - requestStart;
               
-              console.log(`✅ Audio download complete: ${audioBuffer.length} bytes from ${currentPath} in ${downloadTime}ms`);
+              console.log(`✅ Download complete: ${audioBuffer.length} bytes in ${downloadTime}ms (total: ${totalTime}ms)`);
               
-              // Verify we got the expected amount of data
+              // Verify size
               if (audioBuffer.length !== stats.size) {
-                console.error(`❌ Downloaded size mismatch! Expected: ${stats.size}, Got: ${audioBuffer.length}`);
-                pathIndex++;
-                tryNextPath();
-                return;
-              }
-              
-              if (audioBuffer.length === 0) {
-                console.error("❌ Downloaded audio buffer is empty");
-                pathIndex++;
-                tryNextPath();
-                return;
-              }
-
-              // Validate the audio file format
-              const validation = validateAudioBuffer(audioBuffer);
-              console.log(`🔍 Audio validation result:`, validation);
-
-              if (!validation.isValid) {
-                console.error(`❌ Invalid audio file format: ${validation.details}`);
-                console.error(`🔍 File appears to be: ${validation.fileType}`);
-                
-                // Log more details for debugging
-                const firstBytes = audioBuffer.subarray(0, 32).toString('hex');
-                const textContent = audioBuffer.subarray(0, 200).toString('ascii').replace(/[^\x20-\x7E]/g, '.');
-                console.error(`🔍 First 32 bytes (hex): ${firstBytes}`);
-                console.error(`🔍 First 200 bytes (text): "${textContent}"`);
-                
+                console.error(`❌ Size mismatch! Expected: ${stats.size}, Got: ${audioBuffer.length}`);
                 if (!resolved) {
                   resolved = true;
-                  reject(NextResponse.json({ 
-                    error: "Invalid audio file format", 
-                    details: validation.details,
-                    fileType: validation.fileType,
-                    actualContent: textContent.substring(0, 100)
-                  }, { status: 400 }));
+                  resolve(NextResponse.json({ 
+                    error: "Download incomplete - size mismatch" 
+                  }, { status: 500 }));
                 }
                 conn.end();
                 return;
               }
 
-              console.log(`✅ Valid audio file confirmed: ${validation.details}`);
-
-              // Extract just the filename for the download header
+              // Get MIME type (less strict validation)
+              const mimeType = getAudioMimeType(audioBuffer, filename);
               const downloadFilename = filename.split('/').pop() || filename;
               
+              console.log(`✅ Serving as ${mimeType}: ${downloadFilename}`);
+
               if (!resolved) {
                 resolved = true;
-                // Return the audio file with proper headers based on detected format
-                const mimeType = validation.fileType;
                 resolve(
                   new NextResponse(audioBuffer, {
                     status: 200,
@@ -358,9 +339,10 @@ export async function GET(request: Request) {
                       "Content-Type": mimeType,
                       "Content-Length": audioBuffer.length.toString(),
                       "Content-Disposition": `attachment; filename="${downloadFilename}"`,
-                      "Cache-Control": "no-cache",
-                      "X-Audio-Format": validation.details,
+                      "Cache-Control": "no-cache, no-store, max-age=0",
+                      "Accept-Ranges": "bytes",
                       "X-File-Size": audioBuffer.length.toString(),
+                      "X-Download-Time": `${downloadTime}ms`,
                     },
                   })
                 );
@@ -368,14 +350,10 @@ export async function GET(request: Request) {
               
               conn.end();
             });
-
-            readStream.on("close", () => {
-              console.log(`🔐 Read stream closed for ${currentPath}`);
-            });
           });
         };
         
-        // Start trying paths
+        // Start the download process
         tryNextPath();
       });
     });
@@ -383,20 +361,28 @@ export async function GET(request: Request) {
     conn.on("error", (err) => {
       console.error("❌ SFTP connection error:", err);
       clearTimeout(connectionTimeout);
+      clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
-        reject(NextResponse.json({ error: "SFTP connection error" }, { status: 500 }));
+        resolve(NextResponse.json({ 
+          error: "SFTP connection failed",
+          details: err.message 
+        }, { status: 500 }));
       }
     });
 
-    // Establish the connection
+    // Establish connection
     try {
       conn.connect(sftpConfig);
     } catch (e) {
-      console.error("❌ SFTP connection initiation error:", e);
+      console.error("❌ Connection initiation error:", e);
+      clearTimeout(connectionTimeout);
+      clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
-        reject(NextResponse.json({ error: "Failed to initiate SFTP connection" }, { status: 500 }));
+        resolve(NextResponse.json({ 
+          error: "Failed to initiate SFTP connection" 
+        }, { status: 500 }));
       }
     }
   });

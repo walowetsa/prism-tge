@@ -72,7 +72,6 @@ async function saveToSupabase(
 
 /**
  * Get a public URL for SFTP file that AssemblyAI can access directly
- * This avoids downloading and re-uploading large files
  */
 async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
   console.log("Creating public URL for SFTP file:", sftpFilename);
@@ -92,8 +91,8 @@ async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
   // Verify the file is accessible before returning the URL
   try {
     const response = await fetch(publicUrl, { 
-      method: 'HEAD', // Just check if file exists without downloading
-      signal: AbortSignal.timeout(100000) // 10 second timeout for HEAD request
+      method: 'HEAD',
+      signal: AbortSignal.timeout(15000) // Reduced from 10s to 15s
     });
     
     if (!response.ok) {
@@ -104,6 +103,11 @@ async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
     if (contentLength) {
       const sizeInMB = parseInt(contentLength) / (1024 * 1024);
       console.log(`Audio file verified: ${sizeInMB.toFixed(2)}MB`);
+      
+      // Check if file is too large for direct URL approach
+      if (sizeInMB > 100) {
+        throw new Error(`File too large for direct URL: ${sizeInMB.toFixed(2)}MB`);
+      }
     }
 
     return publicUrl;
@@ -115,7 +119,6 @@ async function getPublicAudioUrl(sftpFilename: string): Promise<string> {
 
 /**
  * Fallback function to download and upload for files that can't be accessed directly
- * With increased timeout and better error handling
  */
 async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob> {
   console.log("Downloading SFTP file as fallback:", sftpFilename);
@@ -137,16 +140,14 @@ async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob>
   console.log("Internal download URL:", downloadUrl);
 
   try {
-    // Increase timeout to 2 minutes for large files
+    // Reduced timeout to 90 seconds for better reliability
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 240000); // 2 minutes
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
 
     const response = await fetch(downloadUrl, {
       method: 'GET',
       headers: {
         'User-Agent': 'TranscriptionService/1.0',
-        'Host': 'localhost',
-        'Connection': 'close',
       },
       signal: controller.signal,
     });
@@ -170,8 +171,8 @@ async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob>
       const sizeInMB = parseInt(contentLength) / (1024 * 1024);
       console.log(`Downloading file: ${sizeInMB.toFixed(2)}MB`);
       
-      if (sizeInMB > 500) {
-        throw new Error(`File too large: ${sizeInMB.toFixed(2)}MB (max: 500MB)`);
+      if (sizeInMB > 200) { // Reduced from 500MB to 200MB
+        throw new Error(`File too large: ${sizeInMB.toFixed(2)}MB (max: 200MB)`);
       }
     }
 
@@ -197,7 +198,7 @@ async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob>
     console.error("Error downloading SFTP file:", error);
     
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error("SFTP download timed out after 2 minutes - file might be too large or connection is slow");
+      throw new Error("SFTP download timed out after 90 seconds");
     }
     
     throw new Error(`Failed to download audio file: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -205,7 +206,7 @@ async function getAudioFromSFTPWithFallback(sftpFilename: string): Promise<Blob>
 }
 
 /**
- * Simplified function to upload audio to AssemblyAI with better timeout handling
+ * Function to upload audio to AssemblyAI with better timeout handling
  */
 async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilename?: string): Promise<string> {
   console.log("Uploading audio to AssemblyAI:", {
@@ -214,18 +215,14 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
     originalFilename
   });
 
-  // Create form data with minimal processing
+  // Create form data
   const formData = new FormData();
-  
-  // Use original filename if available, otherwise default to audio.wav
   const filename = originalFilename ? originalFilename.split('/').pop() : 'audio.wav';
-  
-  // Append the blob directly without modification
   formData.append("file", audioBlob, filename);
 
-  // Set timeout based on file size (minimum 60 seconds, max 5 minutes)
+  // Reduced timeout based on file size (minimum 30 seconds, max 2 minutes)
   const sizeInMB = audioBlob.size / (1024 * 1024);
-  const timeoutMs = Math.max(60000, Math.min(300000, sizeInMB * 50000)); // 5 seconds per MB
+  const timeoutMs = Math.max(30000, Math.min(120000, sizeInMB * 3000)); // 3 seconds per MB
   
   console.log(`Upload timeout set to ${timeoutMs / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
 
@@ -273,20 +270,21 @@ async function performTopicCategorization(transcriptData: any) {
 
     console.log("Sending transcript for categorization");
 
-    const topicResponse = await fetch(`${serverUrl}/api/openAI/categorise`, {
+    const response = await fetch(`${serverUrl}/api/openAI/categorise`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ transcript: transcriptData }),
+      signal: AbortSignal.timeout(30000), // 30 second timeout
     });
 
-    if (!topicResponse.ok) {
-      console.error("Topic categorization failed:", topicResponse.status);
+    if (!response.ok) {
+      console.error("Topic categorization failed:", response.status);
       return null;
     }
 
-    const topicData = await topicResponse.json();
+    const topicData = await response.json();
     console.log("Topic categorization received:", topicData);
 
     if (topicData.topic_categories && topicData.topic_categories.length > 0) {
@@ -305,6 +303,10 @@ async function performTopicCategorization(transcriptData: any) {
 }
 
 export async function POST(request: Request) {
+  // Set timeout for the entire request (4 minutes instead of 6)
+  const requestStartTime = Date.now();
+  const MAX_REQUEST_TIME = 4 * 60 * 1000; // 4 minutes
+  
   try {
     const body = await request.json();
     const {
@@ -353,29 +355,20 @@ export async function POST(request: Request) {
       if (isDirectSftpFile && sftpFilename) {
         console.log("Processing SFTP file:", sftpFilename);
         
-        // Try direct URL approach first (much faster for large files)
-        try {
-          console.log("Attempting direct URL approach...");
-          uploadUrl = await getPublicAudioUrl(sftpFilename);
-          console.log("Using direct URL approach successfully");
-        } catch (directUrlError) {
-          console.log("Direct URL failed, falling back to download+upload:", directUrlError);
-          
-          // Fallback to download and upload
-          const audioBlob = await getAudioFromSFTPWithFallback(sftpFilename);
-          uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
-        }
+        // Always use download+upload approach for better reliability
+        console.log("Using download+upload approach for better reliability");
+        const audioBlob = await getAudioFromSFTPWithFallback(sftpFilename);
+        uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
         
       } else if (audioUrl) {
         console.log("Processing audio URL:", audioUrl);
         
-        // For URL-based audio, we can pass the URL directly to AssemblyAI
-        // if it's publicly accessible, otherwise download and upload
         if (audioUrl.startsWith('http')) {
-          uploadUrl = audioUrl; // Use URL directly
+          uploadUrl = audioUrl;
         } else {
-          // Local URL - need to download and upload
-          const response = await fetch(audioUrl);
+          const response = await fetch(audioUrl, {
+            signal: AbortSignal.timeout(60000) // 1 minute timeout
+          });
           if (!response.ok) {
             throw new Error(`Failed to fetch audio: ${response.status}`);
           }
@@ -390,11 +383,10 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error("Error processing audio:", error);
       
-      // Provide specific error messages based on the type of error
       let errorMessage = "Failed to process audio file";
       if (error instanceof Error) {
         if (error.message.includes("timed out")) {
-          errorMessage = "Audio download timed out - file might be too large or connection is slow";
+          errorMessage = "Audio download timed out - file might be too large";
         } else if (error.message.includes("too large")) {
           errorMessage = "Audio file is too large for processing";
         } else if (error.message.includes("not accessible")) {
@@ -416,7 +408,7 @@ export async function POST(request: Request) {
 
     console.log("Submitting transcription request to AssemblyAI...");
 
-    // Submit transcription request with optimized settings for call center audio
+    // Submit transcription request
     const transcriptResponse = await fetch(
       "https://api.assemblyai.com/v2/transcript",
       {
@@ -427,7 +419,7 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({
           audio_url: uploadUrl,
-          speech_model: "best", // Use the best available model
+          speech_model: "best",
           speaker_labels: true,
           speakers_expected: speakerCount || 2,
           summarization: true,
@@ -440,6 +432,7 @@ export async function POST(request: Request) {
           punctuate: true,
           format_text: true,
         }),
+        signal: AbortSignal.timeout(30000), // 30 second timeout for submission
       }
     );
 
@@ -455,14 +448,21 @@ export async function POST(request: Request) {
     const { id } = await transcriptResponse.json();
     console.log(`Transcription job created with ID: ${id}`);
 
-    // Poll for transcription result
+    // Poll for transcription result with reduced timeout
     let transcript;
     let status = "processing";
     let attempts = 0;
-    const maxAttempts = 180; // 6 minutes with 2-second intervals
+    const maxAttempts = 120; // Reduced from 180 to 120 (4 minutes with 2-second intervals)
     const pollInterval = 2000;
 
     while ((status === "processing" || status === "queued") && attempts < maxAttempts) {
+      // Check if we're approaching the overall timeout
+      const elapsed = Date.now() - requestStartTime;
+      if (elapsed > MAX_REQUEST_TIME - 30000) { // Leave 30 seconds buffer
+        console.log("Approaching request timeout, stopping polling");
+        break;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
       attempts++;
 
@@ -473,12 +473,13 @@ export async function POST(request: Request) {
             headers: {
               Authorization: apiKey,
             },
+            signal: AbortSignal.timeout(10000), // 10 second timeout for status checks
           }
         );
 
         if (!statusResponse.ok) {
           console.error("Status check failed:", statusResponse.status);
-          continue; // Try again
+          continue;
         }
 
         transcript = await statusResponse.json();
@@ -486,12 +487,11 @@ export async function POST(request: Request) {
         
         // Log progress every 30 seconds
         if (attempts % 15 === 0) {
-          console.log(`Transcription status: ${status}, attempt: ${attempts}/${maxAttempts}`);
+          console.log(`Transcription status: ${status}, attempt: ${attempts}/${maxAttempts}, elapsed: ${Math.round(elapsed/1000)}s`);
         }
         
       } catch (error) {
         console.error("Error checking transcription status:", error);
-        // Continue polling unless we're near the end
         if (attempts >= maxAttempts - 5) {
           throw error;
         }
@@ -502,7 +502,7 @@ export async function POST(request: Request) {
     if (status === "completed" && transcript) {
       console.log("Transcription completed successfully");
 
-      // Map speaker labels to Agent and Customer
+      // Map speaker labels
       if (transcript.utterances && transcript.utterances.length > 0) {
         transcript.utterances = transcript.utterances.map((utterance: any) => ({
           ...utterance,
@@ -517,10 +517,14 @@ export async function POST(request: Request) {
         }));
       }
 
-      // Perform topic categorization
+      // Perform topic categorization (with timeout protection)
       let categorization = null;
       if (transcript.utterances && transcript.utterances.length > 0) {
-        categorization = await performTopicCategorization(transcript);
+        try {
+          categorization = await performTopicCategorization(transcript);
+        } catch (catError) {
+          console.error("Categorization failed, continuing without it:", catError);
+        }
         
         if (categorization) {
           transcript.topic_categorization = {
@@ -538,15 +542,15 @@ export async function POST(request: Request) {
       }
 
       // Save to Supabase if we have call data
-      try {
-        if (callData) {
+      if (callData) {
+        try {
           console.log("Saving transcription to Supabase...");
           await saveToSupabase(callData, transcript, categorization);
           console.log("Successfully saved to Supabase");
+        } catch (supabaseError) {
+          console.error("Failed to save to Supabase:", supabaseError);
+          // Don't fail the request if Supabase save fails
         }
-      } catch (supabaseError) {
-        console.error("Failed to save to Supabase:", supabaseError);
-        // Don't fail the request if Supabase save fails
       }
 
       return NextResponse.json({
@@ -565,12 +569,13 @@ export async function POST(request: Request) {
         { status: 500 }
       );
       
-    } else if (attempts >= maxAttempts) {
+    } else if (attempts >= maxAttempts || (Date.now() - requestStartTime) > MAX_REQUEST_TIME) {
       console.error("Transcription timed out");
       return NextResponse.json(
         {
-          error: "Transcription timed out. The audio file might be too long or the service is busy.",
+          error: "Transcription timed out. Please try again or check if the audio file is too long.",
           status: "timeout",
+          transcription_id: id, // Include ID so client can potentially check later
         },
         { status: 504 }
       );

@@ -61,13 +61,13 @@ const CallLogDisplay = ({
   // Audio download state
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // FIXED: Improved transcription state management
+  // Improved transcription state management
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
   const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 1; // REDUCED from 5 to 1 for better stability
+  const maxConcurrentTranscriptions = 1;
   
-  // FIXED: Use refs to track progress intervals and prevent memory leaks
+  // Use refs to track progress intervals and prevent memory leaks
   const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
 
@@ -131,7 +131,7 @@ const CallLogDisplay = ({
     return filteredAndSortedCallLogs.slice(startIndex, endIndex);
   }, [filteredAndSortedCallLogs, currentPage]);
 
-  // FIXED: Cleanup function for transcription resources
+  // Cleanup function for transcription resources
   const cleanupTranscription = useCallback((contactId: string) => {
     // Clear progress interval
     const interval = progressIntervals.current.get(contactId);
@@ -155,7 +155,7 @@ const CallLogDisplay = ({
     });
   }, []);
 
-  // FIXED: Cleanup all transcriptions on unmount
+  // Cleanup all transcriptions on unmount
   useEffect(() => {
     return () => {
       // Cleanup all intervals and controllers
@@ -258,38 +258,7 @@ const CallLogDisplay = ({
     setCurrentPage(1);
   }, [selectedAgent, sortField, sortDirection]);
 
-  // Function to categorise transcript
-  const categorizeTranscript = async (transcriptionData: any) => {
-    try {
-      console.log("Starting topic categorization...");
-      
-      const response = await fetch("/api/openAI/categorise", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          transcript: transcriptionData,
-        }),
-      });
-
-      if (!response.ok) {
-        console.error("Categorization failed:", response.statusText);
-        const errorText = await response.text();
-        console.error("Categorization error details:", errorText);
-        return null;
-      }
-
-      const categorization = await response.json();
-      console.log("Categorisation completed:", categorization);
-      return categorization;
-    } catch (error) {
-      console.error("Error in categorisation:", error);
-      return null;
-    }
-  };
-
-  // FIXED: Function to get transcription status component with better error handling
+  // Function to get transcription status component with better error handling
   const getTranscriptionStatus = (log: CallLog) => {
     if (checkSupabase && log.existsInSupabase) {
       return (
@@ -328,192 +297,162 @@ const CallLogDisplay = ({
     }
   };
 
-  // Function to save transcription data to Supabase
-  const saveToSupabase = async (log: CallLog, transcriptionData: any, categorization: any = null) => {
-    try {
-      console.log(
-        `Saving transcription data to Supabase for ${log.contact_id}`
-      );
-
-      const supabasePayload = {
-        contact_id: log.contact_id,
-        recording_location: log.recording_location,
-        transcript_text: transcriptionData.text || "",
-        queue_name: log.queue_name,
-        agent_username: log.agent_username,
-        initiation_timestamp: log.initiation_timestamp,
-        speaker_data: transcriptionData.utterances
-          ? JSON.stringify(transcriptionData.utterances)
-          : null,
-        sentiment_analysis: transcriptionData.sentiment_analysis_results
-          ? JSON.stringify(transcriptionData.sentiment_analysis_results)
-          : null,
-        entities: transcriptionData.entities
-          ? JSON.stringify(transcriptionData.entities)
-          : null,
-        disposition_title: log.disposition_title,
-        call_summary: transcriptionData.summary || null,
-        campaign_name: log.campaign_name,
-        campaign_id: log.campaign_id,
-        customer_cli: log.customer_cli,
-        agent_hold_time: log.agent_hold_time,
-        total_hold_time: log.total_hold_time,
-        time_in_queue: log.time_in_queue,
-        call_duration: log.total_call_time,
-        categories: categorization?.topic_categories 
-          ? JSON.stringify(categorization.topic_categories) 
-          : (transcriptionData.topic_categorization?.all_topics ? JSON.stringify(transcriptionData.topic_categorization.all_topics) : null),
-        primary_category: categorization?.primary_category || transcriptionData.topic_categorization?.primary_topic || null,
-      };
-
-      console.log("Supabase payload with categorization:", {
-        contact_id: supabasePayload.contact_id,
-        categories: supabasePayload.categories,
-        primary_category: supabasePayload.primary_category
-      });
-
-      const response = await fetch("/api/supabase/save-transcription", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(supabasePayload),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to save to Supabase");
+  // IMPROVED: Helper function to safely parse API responses
+  const parseApiResponse = async (response: Response) => {
+    const contentType = response.headers.get('content-type');
+    
+    if (contentType && contentType.includes('application/json')) {
+      try {
+        return await response.json();
+      } catch (jsonError) {
+        console.error("Failed to parse JSON response:", jsonError);
+        const text = await response.text();
+        throw new Error(`Invalid JSON response: ${text.substring(0, 200)}...`);
       }
-
-      const result = await response.json();
-      console.log(
-        `Successfully saved transcription data to Supabase for ${log.contact_id}:`, result
-      );
-      return true;
-    } catch (error) {
-      console.error(`Error saving to Supabase for ${log.contact_id}:`, error);
-      return false;
+    } else {
+      // Response is not JSON (likely HTML error page)
+      const text = await response.text();
+      console.error("Non-JSON response received:", text.substring(0, 500));
+      
+      // Extract error message from HTML if possible
+      if (text.includes('504') || text.includes('Gateway Time-out')) {
+        throw new Error("Request timed out (504 Gateway Timeout). The file might be too large or the server is overloaded.");
+      } else if (text.includes('502') || text.includes('Bad Gateway')) {
+        throw new Error("Server error (502 Bad Gateway). Please try again in a few moments.");
+      } else if (text.includes('500') || text.includes('Internal Server Error')) {
+        throw new Error("Internal server error (500). Please try again later.");
+      } else {
+        throw new Error(`Server returned HTML instead of JSON. Status: ${response.status}`);
+      }
     }
   };
 
   const initiateTranscription = useCallback(async (log: CallLog) => {
-  if (!log.recording_location) return false;
+    if (!log.recording_location) return false;
 
-  const contactId = log.contact_id;
-  
-  // Create abort controller for this transcription
-  const controller = new AbortController();
-  transcriptionControllers.current.set(contactId, controller);
-
-  try {
-    console.log(`Starting transcription for ${contactId}`);
+    const contactId = log.contact_id;
     
-    // Update log status to pending
-    setCallLogs((prevLogs) =>
-      prevLogs.map((l) =>
-        l.contact_id === contactId
-          ? {
-              ...l,
-              transcriptionStatus: "Pending Transcription",
-              transcriptionProgress: 0,
-              transcriptionError: undefined,
-            }
-          : l
-      )
-    );
+    // Create abort controller for this transcription with increased timeout
+    const controller = new AbortController();
+    transcriptionControllers.current.set(contactId, controller);
+    
+    // Set timeout for 5 minutes (300 seconds)
+    const timeoutId = setTimeout(() => {
+      console.log(`Aborting transcription for ${contactId} due to timeout`);
+      controller.abort();
+    }, 300000); // 5 minutes
 
-    // Validate recording location format
-    const fullPath = log.recording_location;
-    if (!fullPath || typeof fullPath !== 'string') {
-      throw new Error("Invalid recording location");
-    }
-
-    const filename = fullPath.split("/").pop();
-    if (!filename) {
-      throw new Error("Could not extract filename from recording location");
-    }
-
-    console.log(`Processing file: ${filename} from path: ${fullPath}`);
-
-    // Set up progress updates with proper cleanup
-    const progressInterval = setInterval(() => {
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) => {
-          if (
-            l.contact_id === contactId &&
-            l.transcriptionStatus === "Pending Transcription"
-          ) {
-            const currentProgress = l.transcriptionProgress || 0;
-            const newProgress = Math.min(85, currentProgress + 2);
-            return { ...l, transcriptionProgress: newProgress };
-          }
-          return l;
-        })
-      );
-    }, 2000);
-
-    progressIntervals.current.set(contactId, progressInterval);
-
-    // UPDATED: Pass complete call data to the transcription API
-    const response = await fetch("/api/transcribe", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        isDirectSftpFile: true,
-        sftpFilename: fullPath,
-        filename: filename,
-        speakerCount: 2,
-        // ADDED: Pass the complete call log data
-        callData: {
-          contact_id: log.contact_id,
-          agent_username: log.agent_username,
-          recording_location: log.recording_location,
-          initiation_timestamp: log.initiation_timestamp,
-          total_call_time: log.total_call_time,
-          campaign_name: log.campaign_name,
-          campaign_id: log.campaign_id,
-          customer_cli: log.customer_cli,
-          agent_hold_time: log.agent_hold_time,
-          total_hold_time: log.total_hold_time,
-          time_in_queue: log.time_in_queue,
-          queue_name: log.queue_name,
-          disposition_title: log.disposition_title,
-        },
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error("Transcription failed:", errorData);
-      throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
-    }
-
-    const transcriptionData = await response.json();
-    console.log(`Transcription API response for ${contactId}:`, transcriptionData);
-
-    // Check if transcription was actually successful
-    const hasValidTranscript = transcriptionData && 
-      transcriptionData.status === "completed" &&
-      transcriptionData.text && 
-      transcriptionData.text.trim().length > 0;
-
-    if (!hasValidTranscript) {
-      console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
+    try {
+      console.log(`Starting transcription for ${contactId}`);
       
-      // Still try to save basic data if available
-      const basicData = {
-        text: transcriptionData?.text || "",
-        utterances: transcriptionData?.utterances || [],
-        summary: transcriptionData?.summary || null,
-        sentiment_analysis_results: transcriptionData?.sentiment_analysis_results || null,
-        entities: transcriptionData?.entities || null,
-        topic_categorization: transcriptionData?.topic_categorization || null
-      };
+      // Update log status to pending
+      setCallLogs((prevLogs) =>
+        prevLogs.map((l) =>
+          l.contact_id === contactId
+            ? {
+                ...l,
+                transcriptionStatus: "Pending Transcription",
+                transcriptionProgress: 0,
+                transcriptionError: undefined,
+              }
+            : l
+        )
+      );
 
-      // Note: Supabase saving is now handled by the API route
+      // Validate recording location format
+      const fullPath = log.recording_location;
+      if (!fullPath || typeof fullPath !== 'string') {
+        throw new Error("Invalid recording location");
+      }
+
+      const filename = fullPath.split("/").pop();
+      if (!filename) {
+        throw new Error("Could not extract filename from recording location");
+      }
+
+      console.log(`Processing file: ${filename} from path: ${fullPath}`);
+
+      // Set up progress updates with proper cleanup
+      const progressInterval = setInterval(() => {
+        setCallLogs((prevLogs) =>
+          prevLogs.map((l) => {
+            if (
+              l.contact_id === contactId &&
+              l.transcriptionStatus === "Pending Transcription"
+            ) {
+              const currentProgress = l.transcriptionProgress || 0;
+              const newProgress = Math.min(85, currentProgress + 2);
+              return { ...l, transcriptionProgress: newProgress };
+            }
+            return l;
+          })
+        );
+      }, 3000); // Increased from 2s to 3s to reduce update frequency
+
+      progressIntervals.current.set(contactId, progressInterval);
+
+      // Make the transcription request
+      const response = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          isDirectSftpFile: true,
+          sftpFilename: fullPath,
+          filename: filename,
+          speakerCount: 2,
+          callData: {
+            contact_id: log.contact_id,
+            agent_username: log.agent_username,
+            recording_location: log.recording_location,
+            initiation_timestamp: log.initiation_timestamp,
+            total_call_time: log.total_call_time,
+            campaign_name: log.campaign_name,
+            campaign_id: log.campaign_id,
+            customer_cli: log.customer_cli,
+            agent_hold_time: log.agent_hold_time,
+            total_hold_time: log.total_hold_time,
+            time_in_queue: log.time_in_queue,
+            queue_name: log.queue_name,
+            disposition_title: log.disposition_title,
+          },
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      // IMPROVED: Use the new parseApiResponse function
+      if (!response.ok) {
+        let errorData;
+        try {
+          errorData = await parseApiResponse(response);
+        } catch (parseError) {
+          console.error("Failed to parse error response:", parseError);
+          throw new Error(`HTTP ${response.status}: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+        }
+        
+        console.error("Transcription failed:", errorData);
+        throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
+      }
+
+      const transcriptionData = await parseApiResponse(response);
+      console.log(`Transcription API response for ${contactId}:`, transcriptionData);
+
+      // Check if transcription was actually successful
+      const hasValidTranscript = transcriptionData && 
+        transcriptionData.status === "completed" &&
+        transcriptionData.text && 
+        transcriptionData.text.trim().length > 0;
+
+      if (!hasValidTranscript) {
+        console.warn(`Transcription returned no valid content for ${contactId}:`, transcriptionData);
+      }
+
+      console.log(`Transcription completed for ${contactId}`);
+
+      // Update log status to transcribed
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
           l.contact_id === contactId
@@ -521,62 +460,52 @@ const CallLogDisplay = ({
                 ...l,
                 transcriptionStatus: "Transcribed",
                 transcriptionProgress: 100,
-                existsInSupabase: true, // Assume saved since API handles it
+                existsInSupabase: true,
+                transcriptionError: undefined,
               }
             : l
         )
       );
 
       return true;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.error(`Error transcribing ${contactId}:`, error);
+
+      let errorMessage = "Unknown error";
+      
+      if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+          errorMessage = "Transcription timed out after 5 minutes";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      setCallLogs((prevLogs) =>
+        prevLogs.map((l) =>
+          l.contact_id === contactId
+            ? {
+                ...l,
+                transcriptionStatus: "Failed",
+                transcriptionProgress: undefined,
+                transcriptionError: errorMessage,
+              }
+            : l
+        )
+      );
+
+      // Add to failed transcriptions set
+      setFailedTranscriptions(prev => new Set(prev).add(contactId));
+
+      return false;
+    } finally {
+      // Always cleanup resources
+      cleanupTranscription(contactId);
     }
+  }, [cleanupTranscription]);
 
-    console.log(`Valid transcription completed for ${contactId}`);
-
-    // Update log status to transcribed
-    setCallLogs((prevLogs) =>
-      prevLogs.map((l) =>
-        l.contact_id === contactId
-          ? {
-              ...l,
-              transcriptionStatus: "Transcribed",
-              transcriptionProgress: 100,
-              existsInSupabase: true, // API route handles Supabase saving
-              transcriptionError: undefined,
-            }
-          : l
-      )
-    );
-
-    return true;
-  } catch (error) {
-    console.error(`Error transcribing ${contactId}:`, error);
-
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    
-    setCallLogs((prevLogs) =>
-      prevLogs.map((l) =>
-        l.contact_id === contactId
-          ? {
-              ...l,
-              transcriptionStatus: "Failed",
-              transcriptionProgress: undefined,
-              transcriptionError: errorMessage,
-            }
-          : l
-      )
-    );
-
-    // Add to failed transcriptions set
-    setFailedTranscriptions(prev => new Set(prev).add(contactId));
-
-    return false;
-  } finally {
-    // Always cleanup resources
-    cleanupTranscription(contactId);
-  }
-}, [cleanupTranscription]);
-
-  // FIXED: Add log to transcription queue with duplicate prevention
+  // Add log to transcription queue with duplicate prevention
   const queueTranscription = useCallback((logId: string) => {
     setTranscriptionQueue((prev) => {
       // Don't add if already in queue, active, or failed
@@ -589,7 +518,7 @@ const CallLogDisplay = ({
     });
   }, [activeTranscriptions, failedTranscriptions]);
 
-  // FIXED: Improved queue processing with better concurrency control
+  // Improved queue processing with better concurrency control
   useEffect(() => {
     const processQueue = async () => {
       if (transcriptionQueue.length === 0) return;
@@ -611,7 +540,7 @@ const CallLogDisplay = ({
         return newSet;
       });
 
-      // FIXED: Process each log with proper async handling
+      // Process each log with proper async handling
       const transcriptionPromises = logsToProcess.map(async (logId) => {
         const logToTranscribe = callLogs.find(log => log.contact_id === logId);
 
@@ -673,7 +602,7 @@ const CallLogDisplay = ({
 
           setCallLogs(logsWithTranscriptionStatus);
           
-          // FIXED: Reset transcription state when new data is loaded
+          // Reset transcription state when new data is loaded
           setTranscriptionQueue([]);
           setActiveTranscriptions(new Set());
           setFailedTranscriptions(new Set());
@@ -697,10 +626,10 @@ const CallLogDisplay = ({
     fetchCallLogs();
   }, [selectedDateRange, checkSupabase]);
 
-  // FIXED: Auto-queue logs with better logic and limits
+  // Auto-queue logs with better logic and limits
   useEffect(() => {
     if (!loading && callLogs.length > 0) {
-      const maxAutoQueue = 15; // Reasonable limit
+      const maxAutoQueue = 10; // Reduced from 15 to 10 for better stability
       let queued = 0;
 
       const totalInProgress = transcriptionQueue.length + activeTranscriptions.size;
@@ -750,7 +679,7 @@ const CallLogDisplay = ({
     return sortDirection === 'asc' ? '↑' : '↓';
   };
 
-  // FIXED: Manual retry function for failed transcriptions
+  // Manual retry function for failed transcriptions
   const retryTranscription = useCallback((contactId: string) => {
     // Remove from failed set and add to queue
     setFailedTranscriptions(prev => {
@@ -824,7 +753,7 @@ const CallLogDisplay = ({
             </div>
           )}
 
-          {/* FIXED: Enhanced queue status indicator */}
+          {/* Enhanced queue status indicator */}
           {(transcriptionQueue.length > 0 || activeTranscriptions.size > 0 || failedTranscriptions.size > 0) && (
             <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
               <div className="text-sm text-[#4ecca3] font-medium">
@@ -832,6 +761,9 @@ const CallLogDisplay = ({
                 {failedTranscriptions.size > 0 && (
                   <span className="text-red-400 ml-2">({failedTranscriptions.size} failed)</span>
                 )}
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                Processing one transcription at a time to avoid timeouts
               </div>
             </div>
           )}
@@ -980,12 +912,12 @@ const CallLogDisplay = ({
                                   View Details
                                 </Link>
                                 
-                                {/* FIXED: Add retry button for failed transcriptions */}
+                                {/* Add retry button for failed transcriptions */}
                                 {log.transcriptionStatus === "Failed" && (
                                   <button
                                     onClick={() => retryTranscription(log.contact_id)}
                                     className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors"
-                                    title="Retry transcription"
+                                    title={`Retry transcription (Error: ${log.transcriptionError})`}
                                   >
                                     Retry
                                   </button>

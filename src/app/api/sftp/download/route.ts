@@ -185,7 +185,7 @@ export async function GET(request: Request) {
     const conn = new Client();
     let resolved = false;
 
-    // Overall request timeout - 2 minutes max
+    // REDUCED: Overall request timeout - 90 seconds instead of 2 minutes
     const overallTimeout = setTimeout(() => {
       if (!resolved) {
         console.error(`⏰ Overall request timeout after ${Date.now() - requestStart}ms`);
@@ -195,9 +195,9 @@ export async function GET(request: Request) {
           error: "Request timeout - file download took too long" 
         }, { status: 504 }));
       }
-    }, 120000); // 2 minutes
+    }, 90000); // 90 seconds instead of 120
 
-    // Connection timeout - 30 seconds
+    // REDUCED: Connection timeout - 20 seconds instead of 30
     const connectionTimeout = setTimeout(() => {
       if (!resolved) {
         console.error("⏰ SFTP connection timeout");
@@ -207,7 +207,7 @@ export async function GET(request: Request) {
           error: "SFTP connection timeout" 
         }, { status: 504 }));
       }
-    }, 30000);
+    }, 20000); // 20 seconds instead of 30
 
     conn.on("ready", () => {
       console.log("✅ SFTP connection ready");
@@ -282,6 +282,15 @@ export async function GET(request: Request) {
               return;
             }
 
+            // IMPROVED: Check if file is too large and might cause timeout
+            const sizeInMB = stats.size / (1024 * 1024);
+            if (sizeInMB > 150) { // Reduced from no limit to 150MB
+              console.log(`⚠️ File too large (${sizeInMB.toFixed(2)}MB), might cause timeout`);
+              pathIndex++;
+              tryNextPath();
+              return;
+            }
+
             // File looks good, download it
             console.log(`📥 Downloading ${stats.size} bytes from: ${currentPath}`);
             
@@ -291,8 +300,8 @@ export async function GET(request: Request) {
             
             const readStream = sftp.createReadStream(currentPath);
 
-            // Download timeout based on file size (minimum 30s, max 90s)
-            const downloadTimeoutMs = Math.min(900000, Math.max(30000, stats.size / (1024 * 1024) * 100000)); // 10s per MB
+            // IMPROVED: Download timeout based on file size (more conservative)
+            const downloadTimeoutMs = Math.min(60000, Math.max(20000, sizeInMB * 5000)); // 5s per MB, max 60s
             const downloadTimeout = setTimeout(() => {
               console.error(`⏰ Download timeout after ${downloadTimeoutMs}ms`);
               readStream.destroy();
@@ -317,10 +326,10 @@ export async function GET(request: Request) {
               fileBuffer.push(chunk);
               totalBytesReceived += chunk.length;
               
-              // Log progress for large files
-              if (stats.size > 5 * 1024 * 1024) { // 5MB+
+              // Log progress for large files (reduced frequency)
+              if (stats.size > 10 * 1024 * 1024) { // 10MB+
                 const progress = ((totalBytesReceived / stats.size) * 100).toFixed(1);
-                if (totalBytesReceived % (1024 * 1024) < chunk.length) { // Every MB
+                if (totalBytesReceived % (2 * 1024 * 1024) < chunk.length) { // Every 2MB instead of 1MB
                   console.log(`📦 Progress: ${progress}%`);
                 }
               }
@@ -404,8 +413,18 @@ export async function GET(request: Request) {
       }
     });
 
+    // IMPROVED: Add connection event handlers for better debugging
+    conn.on("close", () => {
+      console.log("🔌 SFTP connection closed");
+    });
+
+    conn.on("end", () => {
+      console.log("🔚 SFTP connection ended");
+    });
+
     // Establish connection
     try {
+      console.log("🔌 Establishing SFTP connection...");
       conn.connect(sftpConfig);
     } catch (e) {
       console.error("❌ Connection initiation error:", e);

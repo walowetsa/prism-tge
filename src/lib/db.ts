@@ -23,12 +23,22 @@ export async function getContactLogs(dateRange?: DateRange) {
       // Use provided date range
       query = `
         SELECT * FROM reporting.contact_log 
+        WHERE agent_username IS NULL
+        AND disposition_title IS NOT NULL
+        AND disposition_title NOT IN ('No Answer - No Voicemail Available', 'No Answer - Voicemail Available', 'Engaged', 'Done')
+        AND initiation_timestamp >= $1 
+        AND initiation_timestamp <= $2
+        ORDER BY initiation_timestamp DESC
       `;
       params = [dateRange.start, dateRange.end];
     } else {
-      // Fallback to original 7-day query if no date range provided
+      // No date range provided
       query = `
         SELECT * FROM reporting.contact_log 
+        WHERE agent_username IS NULL
+        AND disposition_title IS NOT NULL
+        AND disposition_title NOT IN ('No Answer - No Voicemail Available', 'No Answer - Voicemail Available', 'Engaged', 'Done')
+        ORDER BY initiation_timestamp DESC
       `;
     }
 
@@ -44,7 +54,11 @@ export async function getContactLogs(dateRange?: DateRange) {
 export async function getContactLogsByDateRange() {
   try {
     const result = await pool.query(
-      `SELECT * FROM reporting.contact_log `
+      `SELECT * FROM reporting.contact_log 
+       WHERE agent_username IS NULL
+       AND disposition_title IS NOT NULL
+       AND disposition_title NOT IN ('No Answer - No Voicemail Available', 'No Answer - Voicemail Available', 'Engaged', 'Done')
+       ORDER BY initiation_timestamp DESC`
     );
     return result.rows;
   } catch (error) {

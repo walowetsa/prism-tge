@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable prefer-const */
 // app/api/sftp/download/route.ts
 
@@ -31,11 +30,11 @@ function getSftpConfig(): SftpConfig {
 
 // Simplified audio validation - less strict to avoid false rejections
 function getAudioMimeType(buffer: Buffer, filename: string): string {
-  // Get MIME type from file extension first
+  // Get MIME type from file extension first - this is the most reliable method
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const extensionMimeTypes: Record<string, string> = {
     'wav': 'audio/wav',
-    'mp3': 'audio/mpeg',
+    'mp3': 'audio/mpeg', 
     'flac': 'audio/flac',
     'm4a': 'audio/mp4',
     'aac': 'audio/aac',
@@ -43,13 +42,20 @@ function getAudioMimeType(buffer: Buffer, filename: string): string {
     'wma': 'audio/x-ms-wma',
   };
 
-  // If we have a known audio extension, use it
+  // ALWAYS use extension-based MIME type for known audio formats
   if (extensionMimeTypes[ext]) {
     console.log(`🎵 Using MIME type from extension: ${ext} -> ${extensionMimeTypes[ext]}`);
     return extensionMimeTypes[ext];
   }
 
-  // Fallback to buffer detection for common formats
+  // For unknown extensions, but check if it's likely audio based on filename patterns
+  const lowerFilename = filename.toLowerCase();
+  if (lowerFilename.includes('call') || lowerFilename.includes('recording') || lowerFilename.includes('audio')) {
+    console.log(`🎵 Audio-like filename detected, using audio/wav as default`);
+    return 'audio/wav';
+  }
+
+  // Fallback to buffer detection only if extension is completely unknown
   if (buffer.length >= 12) {
     // Check for WAV
     const riffHeader = buffer.subarray(0, 4).toString('ascii');
@@ -69,17 +75,8 @@ function getAudioMimeType(buffer: Buffer, filename: string): string {
     }
   }
 
-  if (buffer.length >= 4) {
-    // Check for OGG
-    const oggHeader = buffer.subarray(0, 4).toString('ascii');
-    if (oggHeader === 'OggS') {
-      console.log(`🎵 Detected OGG from buffer`);
-      return 'audio/ogg';
-    }
-  }
-
-  // Default to audio/wav for unknown audio files instead of application/octet-stream
-  console.log(`🎵 Unknown format, defaulting to audio/wav`);
+  // DEFAULT TO AUDIO/WAV - Never return application/octet-stream for call recordings
+  console.log(`🎵 Unknown format for "${filename}", defaulting to audio/wav`);
   return 'audio/wav';
 }
 
@@ -149,6 +146,27 @@ export async function GET(request: Request) {
   }
 
   console.log(`🎵 SFTP audio download requested for: ${filename}`);
+  
+  // DEBUGGING: Detailed filename analysis
+  console.log("🔍 SFTP FILENAME DEBUG:");
+  console.log("  Raw filename:", JSON.stringify(filename));
+  console.log("  Filename length:", filename.length);
+  console.log("  Ends with .wav:", filename.endsWith('.wav'));
+  console.log("  Ends with _UTC.wav:", filename.endsWith('_UTC.wav'));
+  console.log("  Last 20 chars:", JSON.stringify(filename.slice(-20)));
+  
+  // Check for any hidden characters or encoding issues
+  const lastChars = filename.slice(-10);
+  console.log("  Last 10 chars (hex):", Array.from(lastChars).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' '));
+  
+  // URL decode check
+  const decodedFilename = decodeURIComponent(filename);
+  if (decodedFilename !== filename) {
+    console.log("  URL encoded difference detected:");
+    console.log("    Original:", JSON.stringify(filename));
+    console.log("    Decoded:", JSON.stringify(decodedFilename));
+  }
+  
   const requestStart = Date.now();
 
   // Get SFTP config
@@ -163,7 +181,7 @@ export async function GET(request: Request) {
     );
   }
 
-  return new Promise<NextResponse>((resolve, reject) => {
+  return new Promise<NextResponse>((resolve) => {
     const conn = new Client();
     let resolved = false;
 
@@ -210,6 +228,13 @@ export async function GET(request: Request) {
 
         const possiblePaths = constructSftpPath(filename);
         console.log(`🔍 Trying ${possiblePaths.length} possible paths`);
+        
+        // DEBUGGING: Log all possible paths
+        console.log("🔍 ALL POSSIBLE PATHS:");
+        possiblePaths.forEach((path, index) => {
+          console.log(`  ${index + 1}. ${JSON.stringify(path)}`);
+          console.log(`     Length: ${path.length}, Ends with .wav: ${path.endsWith('.wav')}`);
+        });
         
         let pathIndex = 0;
         
@@ -329,6 +354,11 @@ export async function GET(request: Request) {
               const downloadFilename = filename.split('/').pop() || filename;
               
               console.log(`✅ Serving as ${mimeType}: ${downloadFilename}`);
+              console.log(`🔍 Response headers will be:`, {
+                'Content-Type': mimeType,
+                'Content-Length': audioBuffer.length.toString(),
+                'Content-Disposition': `attachment; filename="${downloadFilename}"`,
+              });
 
               if (!resolved) {
                 resolved = true;
@@ -343,6 +373,9 @@ export async function GET(request: Request) {
                       "Accept-Ranges": "bytes",
                       "X-File-Size": audioBuffer.length.toString(),
                       "X-Download-Time": `${downloadTime}ms`,
+                      // Add explicit audio headers for AssemblyAI
+                      "X-Content-Type": mimeType, // Backup header
+                      "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Disposition",
                     },
                   })
                 );

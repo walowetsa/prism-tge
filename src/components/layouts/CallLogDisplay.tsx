@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 
@@ -29,6 +30,9 @@ interface CallLog {
   transcriptionProgress?: number;
 }
 
+type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
+type SortDirection = 'asc' | 'desc';
+
 const CallLogDisplay = ({
   selectedDateRange,
   checkSupabase = true,
@@ -42,6 +46,10 @@ const CallLogDisplay = ({
   
   // Agent filter state
   const [selectedAgent, setSelectedAgent] = useState<string>("all");
+  
+  // Sorting state
+  const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
   // Transcription state management - INCREASED TO 5 CONCURRENT
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
@@ -58,13 +66,59 @@ const CallLogDisplay = ({
     return agents;
   }, [callLogs]);
 
-  // Filter call logs by selected agent
-  const filteredCallLogs = useMemo(() => {
-    if (selectedAgent === "all") {
-      return callLogs;
+  // Filter and sort call logs
+  const filteredAndSortedCallLogs = useMemo(() => {
+    let filtered = callLogs;
+    
+    // Apply agent filter
+    if (selectedAgent !== "all") {
+      filtered = callLogs.filter(log => log.agent_username === selectedAgent);
     }
-    return callLogs.filter(log => log.agent_username === selectedAgent);
-  }, [callLogs, selectedAgent]);
+    
+    // Apply sorting
+    return filtered.sort((a, b) => {
+      let aValue: any, bValue: any;
+      
+      switch (sortField) {
+        case 'agent_username':
+          aValue = a.agent_username || '';
+          bValue = b.agent_username || '';
+          break;
+        case 'initiation_timestamp':
+          aValue = new Date(a.initiation_timestamp).getTime();
+          bValue = new Date(b.initiation_timestamp).getTime();
+          break;
+        case 'total_call_time':
+          aValue = (a.total_call_time?.minutes || 0) * 60 + (a.total_call_time?.seconds || 0);
+          bValue = (b.total_call_time?.minutes || 0) * 60 + (b.total_call_time?.seconds || 0);
+          break;
+        case 'queue_name':
+          aValue = a.queue_name || '';
+          bValue = b.queue_name || '';
+          break;
+        case 'disposition_title':
+          aValue = a.disposition_title || '';
+          bValue = b.disposition_title || '';
+          break;
+        default:
+          return 0;
+      }
+      
+      if (aValue < bValue) return sortDirection === 'asc' ? -1 : 1;
+      if (aValue > bValue) return sortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [callLogs, selectedAgent, sortField, sortDirection]);
+
+  // Handle sorting
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
 
   // Reset agent filter when new data is loaded
   useEffect(() => {
@@ -105,31 +159,31 @@ const CallLogDisplay = ({
     }
   };
 
-  // Function to get transcription status dot
-  const getTranscriptionStatusDot = (log: CallLog) => {
+  // Function to get transcription status component
+  const getTranscriptionStatus = (log: CallLog) => {
     if (checkSupabase && log.existsInSupabase) {
-      // Green dot for transcribed/available
       return (
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-          <span className="text-xs text-green-600">Transcribed</span>
-        </div>
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+          <div className="w-2 h-2 bg-green-500 rounded-full mr-1"></div>
+          Transcribed
+        </span>
       );
     } else if (activeTranscriptions.includes(log.contact_id)) {
-      // Yellow dot for in-progress
       return (
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 bg-yellow-500 rounded-full animate-pulse"></div>
-          <span className="text-xs text-yellow-600">In Progress</span>
-        </div>
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+          <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
+          In Progress
+          {log.transcriptionProgress && (
+            <span className="ml-1">({log.transcriptionProgress}%)</span>
+          )}
+        </span>
       );
     } else {
-      // Red dot for pending
       return (
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-          <span className="text-xs text-red-600">Pending</span>
-        </div>
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+          <div className="w-2 h-2 bg-red-500 rounded-full mr-1"></div>
+          Pending
+        </span>
       );
     }
   };
@@ -498,7 +552,7 @@ const CallLogDisplay = ({
         transcriptionQueue.length + activeTranscriptions.length <
         maxAutoQueue
       ) {
-        filteredCallLogs.forEach((log) => {
+        filteredAndSortedCallLogs.forEach((log) => {
           if (
             log.recording_location &&
             log.transcriptionStatus === "Pending Transcription" &&
@@ -518,7 +572,7 @@ const CallLogDisplay = ({
       }
     }
   }, [
-    filteredCallLogs,
+    filteredAndSortedCallLogs,
     loading,
     queueTranscription,
     transcriptionQueue.length,
@@ -538,17 +592,22 @@ const CallLogDisplay = ({
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   };
 
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) return '↕️';
+    return sortDirection === 'asc' ? '↑' : '↓';
+  };
+
   return (
     <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
       {/* Header with title and overview button */}
       <div className="flex items-center justify-between mb-4">
         <h5 className="text-[#4ecca3]">Call Logs</h5>
-          <Link
-            href="/tge/overview"
-            className="px-3 py-2 bg-[#4ecca3] text-[#0a101b] rounded-lg hover:bg-[#3bb891] transition-colors text-sm font-medium"
-          >
-            View All Transcribed Calls
-          </Link>
+        <Link
+          href="/tge/overview"
+          className="px-3 py-2 bg-[#4ecca3] text-[#0a101b] rounded-lg hover:bg-[#3bb891] transition-colors text-sm font-medium"
+        >
+          View All Transcribed Calls
+        </Link>
       </div>
 
       {!selectedDateRange ? (
@@ -585,10 +644,10 @@ const CallLogDisplay = ({
             </div>
           )}
 
-          {/* ENHANCED Queue status indicator for 5 concurrent */}
+          {/* Queue status indicator for 5 concurrent */}
           {(transcriptionQueue.length > 0 || activeTranscriptions.length > 0) && (
             <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
-              <div className="text-sm text-[#3bb89] font-medium">
+              <div className="text-sm text-[#4ecca3] font-medium">
                 Processing transcriptions: {activeTranscriptions.length} active, {transcriptionQueue.length} queued
               </div>
             </div>
@@ -608,14 +667,14 @@ const CallLogDisplay = ({
 
           {!loading && !error && (
             <div>
-              <div className="mb-2 text-sm text-white">
+              <div className="mb-4 text-sm text-white">
                 {selectedAgent === "all" 
                   ? `Found ${callLogs.length} call(s)` 
-                  : `Showing ${filteredCallLogs.length} call(s) for ${selectedAgent} (${callLogs.length} total calls)`
+                  : `Showing ${filteredAndSortedCallLogs.length} call(s) for ${selectedAgent} (${callLogs.length} total calls)`
                 }
               </div>
 
-              {filteredCallLogs.length === 0 ? (
+              {filteredAndSortedCallLogs.length === 0 ? (
                 <div className="text-gray-500 p-4 text-center">
                   {selectedAgent === "all" 
                     ? "No call logs found for this date range"
@@ -623,71 +682,84 @@ const CallLogDisplay = ({
                   }
                 </div>
               ) : (
-                <div
-                  className="space-y-2 max-h-[calc(100vh-280px)] overflow-y-auto [&::-webkit-scrollbar]:w-2
-  [&::-webkit-scrollbar-track]:rounded-full
-  [&::-webkit-scrollbar-track]:bg-gray-100
-  [&::-webkit-scrollbar-thumb]:rounded-full
-  [&::-webkit-scrollbar-thumb]:bg-gray-300
-  dark:[&::-webkit-scrollbar-track]:bg-neutral-700
-  dark:[&::-webkit-scrollbar-thumb]:bg-neutral-500"
-                >
-                  {filteredCallLogs.map((log, index) => (
-                    <div
-                      key={log.contact_id || index}
-                      className="border border-border hover:bg-gray-50 hover:border-gray-400 group rounded p-3 transition-colors bg-bg-primary"
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <Link href={`/tge/${log.contact_id}`} className="flex-1">
-                          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 text-sm">
-                            <div>
-                              <span className="font-semibold text-white group-hover:text-black">
-                                Agent:
-                              </span>
-                              <div className="text-[#4ecca3] flex items-center">
-                                {log.agent_username}
-                              </div>
-                            </div>
-                            <div>
-                              <span className="font-semibold text-white group-hover:text-black">
-                                Call Date/Time:
-                              </span>
-                              <div className="text-[#4ecca3]">
-                                {formatTimestamp(log.initiation_timestamp)}
-                              </div>
-                            </div>
-                            <div>
-                              <span className="font-semibold text-white group-hover:text-black">
-                                Duration:
-                              </span>
-                              <div className="text-[#4ecca3]">
-                                {formatCallDuration(log.total_call_time)}
-                              </div>
-                            </div>
-                            <div>
-                              <span className="font-semibold text-white group-hover:text-black">
-                                Queue:
-                              </span>
-                              <div className="text-[#4ecca3]">
-                                {log.queue_name || "N/A"}
-                              </div>
-                            </div>
-                            <div>
-                              <span className="font-semibold text-white group-hover:text-black">
-                                Disposition:
-                              </span>
-                              <div className="text-[#4ecca3]">
-                                {log.disposition_title || "N/A"}
-                              </div>
-                            </div>
-                          </div>
-                        </Link>
-                        <div className="ml-4 flex-shrink-0">
-                          {getTranscriptionStatusDot(log)}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                <div className="overflow-x-auto border border-border rounded-lg">
+                  <table className="min-w-full bg-bg-primary">
+                    <thead className="bg-bg-secondary border-b border-border sticky top-0">
+                      <tr>
+                        <th 
+                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                          onClick={() => handleSort('agent_username')}
+                        >
+                          Agent {getSortIcon('agent_username')}
+                        </th>
+                        <th 
+                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                          onClick={() => handleSort('initiation_timestamp')}
+                        >
+                          Call Date/Time {getSortIcon('initiation_timestamp')}
+                        </th>
+                        <th 
+                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                          onClick={() => handleSort('total_call_time')}
+                        >
+                          Duration {getSortIcon('total_call_time')}
+                        </th>
+                        <th 
+                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                          onClick={() => handleSort('queue_name')}
+                        >
+                          Queue {getSortIcon('queue_name')}
+                        </th>
+                        <th 
+                          className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
+                          onClick={() => handleSort('disposition_title')}
+                        >
+                          Disposition {getSortIcon('disposition_title')}
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
+                          Transcription Status
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {filteredAndSortedCallLogs.map((log, index) => (
+                        <tr 
+                          key={log.contact_id || index}
+                          className="hover:bg-gray-800 transition-colors"
+                        >
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                            {log.agent_username}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                            {formatTimestamp(log.initiation_timestamp)}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                            {formatCallDuration(log.total_call_time)}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                            {log.queue_name || "N/A"}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                            {log.disposition_title || "N/A"}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm">
+                            {getTranscriptionStatus(log)}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-sm">
+                            <Link 
+                              href={`/tge/${log.contact_id}`}
+                              className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
+                            >
+                              View Details
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

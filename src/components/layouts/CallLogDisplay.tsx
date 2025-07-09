@@ -56,6 +56,9 @@ const CallLogDisplay = ({
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
 
+  // Audio download state
+  const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
+
   // Transcription state management - INCREASED TO 5 CONCURRENT
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<string[]>(
@@ -130,6 +133,77 @@ const CallLogDisplay = ({
     } else {
       setSortField(field);
       setSortDirection('asc');
+    }
+  };
+
+  // Handle audio download
+  const handleAudioDownload = async (log: CallLog) => {
+    if (!log.recording_location) {
+      alert("No audio file available for this call");
+      return;
+    }
+
+    const contactId = log.contact_id;
+    
+    // Check if already downloading
+    if (downloadingAudio.includes(contactId)) {
+      return;
+    }
+
+    // Add to downloading state
+    setDownloadingAudio(prev => [...prev, contactId]);
+
+    try {
+      console.log(`🎵 Starting audio download for call ${contactId}`);
+      console.log(`📁 Recording location: ${log.recording_location}`);
+
+      // Use the SFTP download endpoint
+      const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
+      
+      console.log(`🌐 Download URL: ${downloadUrl}`);
+
+      const response = await fetch(downloadUrl);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ Download failed: ${response.status} - ${errorText}`);
+        throw new Error(`Download failed: ${response.status} - ${errorText}`);
+      }
+
+      // Get the blob
+      const blob = await response.blob();
+      console.log(`📦 Downloaded blob: ${blob.size} bytes, type: ${blob.type}`);
+
+      if (blob.size === 0) {
+        throw new Error("Downloaded file is empty");
+      }
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      
+      // Extract filename from recording location
+      const filename = log.recording_location.split('/').pop() || `call_${contactId}.wav`;
+      a.download = filename;
+      
+      // Trigger download
+      document.body.appendChild(a);
+      a.click();
+      
+      // Cleanup
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      console.log(`✅ Audio download completed for call ${contactId}`);
+
+    } catch (error) {
+      console.error(`❌ Error downloading audio for call ${contactId}:`, error);
+      alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      // Remove from downloading state
+      setDownloadingAudio(prev => prev.filter(id => id !== contactId));
     }
   };
 
@@ -808,12 +882,41 @@ const CallLogDisplay = ({
                               {getTranscriptionStatus(log)}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm">
-                              <Link 
-                                href={`/tge/${log.contact_id}`}
-                                className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
-                              >
-                                View Details
-                              </Link>
+                              <div className="flex items-center space-x-2">
+                                <Link 
+                                  href={`/tge/${log.contact_id}`}
+                                  className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
+                                >
+                                  View Details
+                                </Link>
+                                
+                                {/* Audio Download Button */}
+                                {log.recording_location && (
+                                  <button
+                                    onClick={() => handleAudioDownload(log)}
+                                    disabled={downloadingAudio.includes(log.contact_id)}
+                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
+                                    title="Download audio file"
+                                  >
+                                    {downloadingAudio.includes(log.contact_id) ? (
+                                      <>
+                                        <svg className="animate-spin -ml-1 mr-1 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        Downloading...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                        Audio
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         ))}

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from "next/server";
 
@@ -102,6 +103,88 @@ async function saveToSupabase(
 }
 
 /**
+ * Helper function to validate if a blob appears to be an audio file
+ * @param blob The blob to validate
+ * @param filename The original filename
+ * @returns Promise<boolean>
+ */
+async function validateAudioFile(blob: Blob, filename?: string): Promise<{ isValid: boolean; detectedType?: string; reason?: string }> {
+  try {
+    // Check file size
+    if (blob.size < 100) {
+      return { isValid: false, reason: "File too small to be valid audio" };
+    }
+
+    // Read first few bytes to detect file format
+    const buffer = await blob.slice(0, 16).arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    
+    // Convert bytes to hex string for easier checking
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    console.log("File header bytes:", hex);
+    
+    // Check for common audio file signatures
+    const signatures = {
+      'wav': ['52494646', '57415645'], // RIFF...WAVE
+      'mp3': ['494433', 'fff3', 'fff2', 'fffa', 'fffb'], // ID3, or MP3 frame headers
+      'flac': ['664c6143'], // fLaC
+      'm4a': ['66747970'], // ftyp (part of MP4 container)
+      'ogg': ['4f676753'], // OggS
+    };
+
+    let detectedType = null;
+    
+    // Check WAV
+    if (hex.startsWith('52494646') && hex.includes('57415645')) {
+      detectedType = 'wav';
+    }
+    // Check MP3
+    else if (hex.startsWith('494433') || hex.startsWith('fff')) {
+      detectedType = 'mp3';
+    }
+    // Check FLAC
+    else if (hex.startsWith('664c6143')) {
+      detectedType = 'flac';
+    }
+    // Check M4A/MP4
+    else if (hex.includes('66747970')) {
+      detectedType = 'm4a';
+    }
+    // Check OGG
+    else if (hex.startsWith('4f676753')) {
+      detectedType = 'ogg';
+    }
+
+    if (detectedType) {
+      console.log(`Detected audio format: ${detectedType}`);
+      return { isValid: true, detectedType };
+    } else {
+      console.warn("No recognized audio format detected");
+      console.log("First 16 bytes as text:", new TextDecoder('utf-8', { fatal: false }).decode(bytes));
+      
+      // Sometimes files might be valid but not have standard headers
+      // If filename suggests audio format, give it a chance
+      if (filename) {
+        const ext = filename.split('.').pop()?.toLowerCase();
+        const audioExts = ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'wma'];
+        if (ext && audioExts.includes(ext)) {
+          console.log(`File extension suggests audio (${ext}), allowing despite unrecognized header`);
+          return { isValid: true, detectedType: ext, reason: "Validated by file extension" };
+        }
+      }
+      
+      return { 
+        isValid: false, 
+        reason: `Unrecognized file format. Header: ${hex.substring(0, 16)}...` 
+      };
+    }
+  } catch (error) {
+    console.error("Error validating audio file:", error);
+    return { isValid: false, reason: "Failed to validate file" };
+  }
+}
+
+/**
  * Helper function to download a file from SFTP
  * @param sftpFilename The filename or path in the SFTP server
  * @returns An audio blob
@@ -124,13 +207,45 @@ async function getSftpAudio(sftpFilename: string) {
     throw new Error(`Failed to fetch SFTP file: ${audioResponse.status} - ${errorText}`);
   }
 
+  // Get content type and size info
+  const contentType = audioResponse.headers.get('content-type');
+  const contentLength = audioResponse.headers.get('content-length');
+  
+  console.log("SFTP Response Headers:", {
+    contentType,
+    contentLength,
+    headers: Object.fromEntries(audioResponse.headers.entries())
+  });
+
   const audioBlob = await audioResponse.blob();
-  console.log("Retrieved audio blob size:", audioBlob.size, "bytes");
+  console.log("Retrieved audio blob:", {
+    size: audioBlob.size,
+    type: audioBlob.type,
+    sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2)
+  });
 
   if (audioBlob.size === 0) {
     throw new Error("Retrieved audio file is empty");
   }
 
+  // Validate minimum file size (should be at least a few KB for any real audio)
+  if (audioBlob.size < 1000) {
+    throw new Error(`Audio file too small: ${audioBlob.size} bytes - might be corrupted`);
+  }
+
+  // Check if we have a reasonable file size (not too large either)
+  const maxSizeMB = 500; // 500MB max
+  if (audioBlob.size > maxSizeMB * 1024 * 1024) {
+    throw new Error(`Audio file too large: ${(audioBlob.size / (1024 * 1024)).toFixed(2)}MB - exceeds ${maxSizeMB}MB limit`);
+  }
+
+  // Validate that this appears to be an audio file
+  const validation = await validateAudioFile(audioBlob, sftpFilename);
+  if (!validation.isValid) {
+    throw new Error(`Invalid audio file: ${validation.reason}`);
+  }
+
+  console.log("Audio file validation passed:", validation);
   return audioBlob;
 }
 
@@ -174,16 +289,81 @@ async function getAudioFromUrl(audioUrl: string) {
  * Helper function to upload audio to AssemblyAI
  * @param audioBlob The audio blob or URL to upload
  * @param apiKey The AssemblyAI API key
+ * @param originalFilename The original filename for format detection
  * @returns The upload URL for transcription
  */
-async function uploadToAssemblyAI(audioBlob: Blob | string, apiKey: string) {
+async function uploadToAssemblyAI(audioBlob: Blob | string, apiKey: string, originalFilename?: string) {
   if (typeof audioBlob === "string") {
     return audioBlob;
   }
 
-  console.log("Uploading audio blob to AssemblyAI, size:", audioBlob.size);
+  console.log("Uploading audio blob to AssemblyAI:", {
+    size: audioBlob.size,
+    type: audioBlob.type,
+    sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2),
+    originalFilename
+  });
+
+  // Determine file extension and MIME type
+  let filename = "audio.wav"; // default
+  let mimeType = "audio/wav"; // default
+
+  if (originalFilename) {
+    const ext = originalFilename.split('.').pop()?.toLowerCase();
+    console.log("File extension detected:", ext);
+    
+    switch (ext) {
+      case 'mp3':
+        filename = "audio.mp3";
+        mimeType = "audio/mpeg";
+        break;
+      case 'wav':
+        filename = "audio.wav";
+        mimeType = "audio/wav";
+        break;
+      case 'flac':
+        filename = "audio.flac";
+        mimeType = "audio/flac";
+        break;
+      case 'm4a':
+        filename = "audio.m4a";
+        mimeType = "audio/mp4";
+        break;
+      case 'aac':
+        filename = "audio.aac";
+        mimeType = "audio/aac";
+        break;
+      case 'ogg':
+        filename = "audio.ogg";
+        mimeType = "audio/ogg";
+        break;
+      case 'wma':
+        filename = "audio.wma";
+        mimeType = "audio/x-ms-wma";
+        break;
+      default:
+        console.warn(`Unknown audio format: ${ext}, using WAV as default`);
+        filename = "audio.wav";
+        mimeType = "audio/wav";
+    }
+  }
+
+  console.log("Using filename:", filename, "with MIME type:", mimeType);
+
   const uploadFormData = new FormData();
-  uploadFormData.append("file", audioBlob, "audio.wav");
+  
+  // Create a new Blob with the correct MIME type if needed
+  const correctedBlob = audioBlob.type === mimeType 
+    ? audioBlob 
+    : new Blob([audioBlob], { type: mimeType });
+    
+  uploadFormData.append("file", correctedBlob, filename);
+
+  console.log("Uploading to AssemblyAI with corrected blob:", {
+    size: correctedBlob.size,
+    type: correctedBlob.type,
+    filename
+  });
 
   const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
     method: "POST",
@@ -197,7 +377,7 @@ async function uploadToAssemblyAI(audioBlob: Blob | string, apiKey: string) {
     const errorData = await uploadResponse.json();
     console.error("AssemblyAI upload error:", errorData);
     throw new Error(
-      `Failed to upload audio to AssemblyAI: ${JSON.stringify(errorData)}`
+      `Failed to upload audio to AssemblyAI: ${uploadResponse.status} - ${JSON.stringify(errorData)}`
     );
   }
 
@@ -306,18 +486,41 @@ export async function POST(request: Request) {
       if (isDirectSftpFile && sftpFilename) {
         console.log("Processing SFTP file:", sftpFilename);
         const audioBlob = await getSftpAudio(sftpFilename);
-        fileToTranscribe = await uploadToAssemblyAI(audioBlob, apiKey);
+        
+        // Extract filename for format detection
+        const originalFilename = sftpFilename.split('/').pop() || filename;
+        console.log("Original filename for format detection:", originalFilename);
+        
+        fileToTranscribe = await uploadToAssemblyAI(audioBlob, apiKey, originalFilename);
       } else if (audioUrl) {
         console.log("Processing audio URL:", audioUrl);
         const audioSource = await getAudioFromUrl(audioUrl);
-        fileToTranscribe = await uploadToAssemblyAI(audioSource, apiKey);
+        fileToTranscribe = await uploadToAssemblyAI(audioSource, apiKey, filename);
       }
     } catch (error) {
       console.error("Error getting or uploading audio:", error);
+      
+      // Provide more specific error information
+      let errorMessage = "Failed to process audio file";
+      if (error instanceof Error) {
+        if (error.message.includes("too small")) {
+          errorMessage = "Audio file is too small or corrupted";
+        } else if (error.message.includes("too large")) {
+          errorMessage = "Audio file is too large";
+        } else if (error.message.includes("Failed to fetch SFTP")) {
+          errorMessage = "Cannot download audio file from server";
+        } else if (error.message.includes("Failed to upload")) {
+          errorMessage = "Cannot upload audio file to transcription service";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
       return NextResponse.json(
         { 
-          error: "Failed to process audio file",
-          details: error instanceof Error ? error.message : "Unknown error"
+          error: errorMessage,
+          details: error instanceof Error ? error.message : "Unknown error",
+          stage: "audio_processing"
         },
         { status: 500 }
       );

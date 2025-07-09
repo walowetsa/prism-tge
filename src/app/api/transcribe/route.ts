@@ -186,67 +186,117 @@ async function validateAudioFile(blob: Blob, filename?: string): Promise<{ isVal
 
 /**
  * Helper function to download a file from SFTP
+* Helper function to download a file from SFTP (Fixed for server-side calls)
  * @param sftpFilename The filename or path in the SFTP server
  * @returns An audio blob
  */
 async function getSftpAudio(sftpFilename: string) {
   console.log("Fetching SFTP file:", sftpFilename);
 
-  const serverUrl =
-    process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:3000";
-  const sftpApiUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(
-    sftpFilename
-  )}`;
+  try {
+    // FIXED: Use localhost explicitly for server-side calls
+    const port = process.env.PORT || 3000;
+    const sftpApiUrl = `http://localhost:${port}/api/sftp/download?filename=${encodeURIComponent(sftpFilename)}`;
 
-  console.log("SFTP API URL:", sftpApiUrl);
+    console.log("SFTP API URL (server-side):", sftpApiUrl);
 
-  const audioResponse = await fetch(sftpApiUrl);
-  if (!audioResponse.ok) {
-    const errorText = await audioResponse.text();
-    console.error("Failed to fetch SFTP file:", errorText);
-    throw new Error(`Failed to fetch SFTP file: ${audioResponse.status} - ${errorText}`);
+    const audioResponse = await fetch(sftpApiUrl, {
+      method: 'GET',
+      headers: {
+        'Host': 'localhost',
+        'User-Agent': 'TranscriptionService/1.0',
+        'Accept': '*/*',
+      },
+      // Add timeout to prevent hanging
+      signal: AbortSignal.timeout(30000), // 30 second timeout
+    });
+
+    console.log("SFTP Response status:", audioResponse.status);
+    
+    if (!audioResponse.ok) {
+      const errorText = await audioResponse.text();
+      console.error("SFTP download failed:", {
+        status: audioResponse.status,
+        statusText: audioResponse.statusText,
+        headers: Object.fromEntries(audioResponse.headers.entries()),
+        errorText: errorText.substring(0, 500)
+      });
+      
+      // More specific error messages
+      if (audioResponse.status === 404) {
+        throw new Error(`SFTP file not found: ${sftpFilename}`);
+      } else if (audioResponse.status === 401 || audioResponse.status === 403) {
+        throw new Error(`SFTP authentication failed`);
+      } else if (audioResponse.status >= 500) {
+        throw new Error(`SFTP server error: ${audioResponse.status}`);
+      } else {
+        throw new Error(`SFTP download failed: ${audioResponse.status} - ${errorText.substring(0, 100)}`);
+      }
+    }
+
+    // Log response headers for debugging
+    console.log("SFTP Response headers:", Object.fromEntries(audioResponse.headers.entries()));
+
+    const audioBlob = await audioResponse.blob();
+    console.log("Retrieved audio blob:", {
+      size: audioBlob.size,
+      type: audioBlob.type,
+      sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2)
+    });
+
+    // Validate file
+    if (audioBlob.size === 0) {
+      throw new Error("Retrieved audio file is empty");
+    }
+
+    if (audioBlob.size < 1000) {
+      throw new Error(`Audio file too small: ${audioBlob.size} bytes`);
+    }
+
+    const maxSizeMB = 500;
+    if (audioBlob.size > maxSizeMB * 1024 * 1024) {
+      throw new Error(`Audio file too large: ${(audioBlob.size / (1024 * 1024)).toFixed(2)}MB`);
+    }
+
+    // Quick validation of file content
+    const buffer = await audioBlob.slice(0, 16).arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    console.log("File header (first 16 bytes):", hex);
+    
+    // Check for common audio signatures
+    const isWav = hex.startsWith('52494646') && hex.includes('57415645');
+    const isMp3 = hex.startsWith('494433') || hex.startsWith('fff');
+    const isFlac = hex.startsWith('664c6143');
+    const isM4a = hex.includes('66747970');
+    const isOgg = hex.startsWith('4f676753');
+    
+    if (!isWav && !isMp3 && !isFlac && !isM4a && !isOgg) {
+      console.warn("File header doesn't match common audio formats:", hex);
+      // Check file extension as fallback
+      const ext = sftpFilename.split('.').pop()?.toLowerCase();
+      const audioExts = ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg', 'wma'];
+      if (!ext || !audioExts.includes(ext)) {
+        throw new Error(`File doesn't appear to be audio. Header: ${hex.substring(0, 16)}`);
+      }
+      console.log("Proceeding based on file extension:", ext);
+    } else {
+      console.log("Audio format detected from header");
+    }
+
+    return audioBlob;
+
+  } catch (error) {
+    console.error("Error in getSftpAudio:", error);
+    
+    if (error instanceof Error) {
+      // Re-throw with more context
+      throw new Error(`SFTP download failed for ${sftpFilename}: ${error.message}`);
+    } else {
+      throw new Error(`SFTP download failed for ${sftpFilename}: Unknown error`);
+    }
   }
-
-  // Get content type and size info
-  const contentType = audioResponse.headers.get('content-type');
-  const contentLength = audioResponse.headers.get('content-length');
-  
-  console.log("SFTP Response Headers:", {
-    contentType,
-    contentLength,
-    headers: Object.fromEntries(audioResponse.headers.entries())
-  });
-
-  const audioBlob = await audioResponse.blob();
-  console.log("Retrieved audio blob:", {
-    size: audioBlob.size,
-    type: audioBlob.type,
-    sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2)
-  });
-
-  if (audioBlob.size === 0) {
-    throw new Error("Retrieved audio file is empty");
-  }
-
-  // Validate minimum file size (should be at least a few KB for any real audio)
-  if (audioBlob.size < 1000) {
-    throw new Error(`Audio file too small: ${audioBlob.size} bytes - might be corrupted`);
-  }
-
-  // Check if we have a reasonable file size (not too large either)
-  const maxSizeMB = 500; // 500MB max
-  if (audioBlob.size > maxSizeMB * 1024 * 1024) {
-    throw new Error(`Audio file too large: ${(audioBlob.size / (1024 * 1024)).toFixed(2)}MB - exceeds ${maxSizeMB}MB limit`);
-  }
-
-  // Validate that this appears to be an audio file
-  const validation = await validateAudioFile(audioBlob, sftpFilename);
-  if (!validation.isValid) {
-    throw new Error(`Invalid audio file: ${validation.reason}`);
-  }
-
-  console.log("Audio file validation passed:", validation);
-  return audioBlob;
 }
 
 /**

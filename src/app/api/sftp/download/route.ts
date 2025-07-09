@@ -27,6 +27,77 @@ function getSftpConfig(): SftpConfig {
   };
 }
 
+// Helper function to construct the proper SFTP path following ./YYYY/MM/DD/filename structure
+function constructSftpPath(filename: string): string[] {
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1;
+  const currentDay = currentDate.getDate();
+  
+  // Known prefixes that indicate a full path is already provided
+  const knownPrefixes = [
+    `./`,
+    `/`,
+    `${currentYear}/`,
+    `tsa-dialler/`,
+    `amazon-connect-b1a9c08821e5/tsa-dialler/`
+  ];
+  
+  const hasKnownPrefix = knownPrefixes.some(prefix => 
+    filename.startsWith(prefix)
+  );
+  
+  const possiblePaths = [];
+  
+  if (hasKnownPrefix) {
+    // Clean up the path if it has unwanted prefixes
+    let cleanPath = filename;
+    
+    if (cleanPath.startsWith('amazon-connect-b1a9c08821e5/')) {
+      cleanPath = cleanPath.replace('amazon-connect-b1a9c08821e5/', '');
+    }
+    
+    if (!cleanPath.startsWith('./') && !cleanPath.startsWith('/')) {
+      cleanPath = `./${cleanPath}`;
+    }
+    
+    possiblePaths.push(cleanPath);
+  } else {
+    // If no known prefix, try multiple date combinations
+    const justFilename = filename.split('/').pop() || filename;
+    
+    // Try current date first
+    possiblePaths.push(
+      `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${currentDay.toString().padStart(2, '0')}/${justFilename}`
+    );
+    
+    // Try a few days back in case file is from previous days
+    for (let daysBack = 1; daysBack <= 7; daysBack++) {
+      const pastDate = new Date(currentDate);
+      pastDate.setDate(currentDate.getDate() - daysBack);
+      
+      const year = pastDate.getFullYear();
+      const month = pastDate.getMonth() + 1;
+      const day = pastDate.getDate();
+      
+      possiblePaths.push(
+        `./${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
+      );
+    }
+    
+    // Try the current month but different days
+    for (let day = 1; day <= 31; day++) {
+      if (day !== currentDay) {
+        possiblePaths.push(
+          `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
+        );
+      }
+    }
+  }
+  
+  return possiblePaths;
+}
+
 export async function GET(request: Request) {
   // Get the filename from the query parameters
   const url = new URL(request.url);
@@ -78,109 +149,59 @@ export async function GET(request: Request) {
         return;
       }
 
-      // Enhanced path handling logic
-      let remotePath = filename;
+      // Get all possible paths for the file
+      const possiblePaths = constructSftpPath(filename);
+      console.log(`Trying ${possiblePaths.length} possible paths for file: ${filename}`);
       
-      // Check various formats - full awareness of possible path patterns
-      const knownPrefixes = [
-        './2025/', 
-        './tsa-dialler/', 
-        '/tsa-dialler/', 
-        'tsa-dialler/', 
-        'amazon-connect-b1a9c08821e5/tsa-dialler/'
-      ];
+      let pathIndex = 0;
+      let fileFound = false;
       
-      const hasKnownPrefix = knownPrefixes.some(prefix => 
-        filename.startsWith(prefix)
-      );
-      
-      // If no known prefix, assume it's just a filename and add the path
-      if (!hasKnownPrefix) {
-        // Get today's date for the folder structure
-        const now = new Date();
-        const year = now.getFullYear().toString();
-        const month = (now.getMonth() + 1).toString().padStart(2, '0');
-        const day = now.getDate().toString().padStart(2, '0');
-        
-        remotePath = `./${year}/${month}/${day}/${filename}`;
-        console.log(`No path prefix detected, using current date path: ${remotePath}`);
-      } else {
-        console.log(`Using provided path: ${remotePath}`);
-      }
-      
-      // For amazon-connect prefix, we might need to strip it
-      if (remotePath.startsWith('amazon-connect-b1a9c08821e5/')) {
-        remotePath = remotePath.replace('amazon-connect-b1a9c08821e5/', '');
-        console.log(`Stripped amazon-connect prefix, using: ${remotePath}`);
-      }
-      
-      // Ensure path starts with ./ or / for SFTP
-      if (!remotePath.startsWith('./') && !remotePath.startsWith('/')) {
-        remotePath = `./${remotePath}`;
-      }
-      
-      console.log(`Final SFTP path: ${remotePath}`);
-
-      // Create a read stream for the file
-      const readStream = sftp.createReadStream(remotePath);
-
-      // Handle potential errors on the read stream
-      readStream.on("error", (err: Error) => {
-        console.error("File read error:", err);
-        
-        // Try a fallback path if the first attempt fails
-        if (!remotePath.includes("2025/06/01")) {
-          const fallbackPath = `./2025/06/01/${filename.split('/').pop()}`;
-          console.log(`First path failed, trying fallback: ${fallbackPath}`);
-          
-          const fallbackStream = sftp.createReadStream(fallbackPath);
-          
-          fallbackStream.on("error", (fallbackErr: Error) => {
-            console.error("Fallback path also failed:", fallbackErr);
-            writer.close();
-            conn.end();
-          });
-          
-          fallbackStream.on("data", async (chunk: Buffer) => {
-            try {
-              await writer.write(chunk);
-              console.log(`Read ${chunk.length} bytes from fallback SFTP path`);
-            } catch (e) {
-              console.error("Error writing chunk from fallback:", e);
-              conn.end();
-            }
-          });
-          
-          fallbackStream.on("end", async () => {
-            console.log("Finished reading from fallback SFTP path");
-            await writer.close();
-            conn.end();
-          });
-          
+      const tryNextPath = () => {
+        if (pathIndex >= possiblePaths.length) {
+          console.error(`File not found in any of the ${possiblePaths.length} attempted paths`);
+          writer.close();
+          conn.end();
           return;
         }
         
-        writer.close();
-        conn.end();
-      });
+        const currentPath = possiblePaths[pathIndex];
+        console.log(`Attempting path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
+        
+        // Create a read stream for the file
+        const readStream = sftp.createReadStream(currentPath);
 
-      // Process the data in chunks
-      readStream.on("data", async (chunk: Buffer) => {
-        try {
-          await writer.write(chunk);
-          // Add some debug information to track data flow
-          console.log(`Read ${chunk.length} bytes from SFTP file`);
-        } catch (e) {
-          console.error("Error writing chunk:", e);
+        // Handle potential errors on the read stream
+        readStream.on("error", (readErr: Error) => {
+          console.log(`Path ${pathIndex + 1} failed: ${readErr.message}`);
+          pathIndex++;
+          tryNextPath();
+        });
+
+        // Process the data in chunks
+        readStream.on("data", async (chunk: Buffer) => {
+          if (!fileFound) {
+            fileFound = true;
+            console.log(`✅ File found at path: ${currentPath}`);
+          }
+          
+          try {
+            await writer.write(chunk);
+            console.log(`Read ${chunk.length} bytes from SFTP file`);
+          } catch (e) {
+            console.error("Error writing chunk:", e);
+            conn.end();
+          }
+        });
+
+        readStream.on("end", async () => {
+          console.log(`✅ Finished reading SFTP file from: ${currentPath}`);
+          await writer.close();
           conn.end();
-        }
-      });
-
-      readStream.on("end", async () => {
-        console.log("Finished reading SFTP file");
-        await writer.close();
-        conn.end();
-      });
+        });
+      };
+      
+      // Start trying paths
+      tryNextPath();
     });
   });
 
@@ -198,11 +219,14 @@ export async function GET(request: Request) {
     writer.close();
   }
 
-  // Return the response with appropriate headers
+  // Extract just the filename for the download header
+  const downloadFilename = filename.split('/').pop() || filename;
+  
+  // Return the response with appropriate headers for WAV files
   return new NextResponse(stream.readable, {
     headers: {
-      "Content-Disposition": `attachment; filename="${filename.split('/').pop()}"`,
-      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+      "Content-Type": "audio/wav",
     },
   });
 }

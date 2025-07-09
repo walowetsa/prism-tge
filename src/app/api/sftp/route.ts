@@ -17,7 +17,10 @@ type FileInfo = {
   filename: string;
   size: number;
   modifyTime: string;
-  path: string; // Added path to include directory information
+  path: string;
+  year: string;
+  month: string;
+  day: string;
 };
 
 // Define the SFTP configuration
@@ -31,32 +34,31 @@ const sftpConfig: SftpConfig = {
   passphrase: process.env.SFTP_PASSPHRASE!,
 };
 
-// Get directories for current year and past 3 months
+// Get directories for current year and all months up to current month
 const getDirectoriesToScan = () => {
-  const currentYear = 2025;
-  const directories = [];
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1; // getMonth() returns 0-11
+  const currentDay = currentDate.getDate();
   
-  // Scan the current year
+  const directories = [];
   const baseDir = `./${currentYear}`;
   
-  // Get all months up to current month (1-12)
-  // for (let month = 1; month <= 12; month++) {
-    // Pad month with leading zero if needed
-    // const monthStr = month.toString().padStart(2, '0');
+  // Scan all months from January up to current month
+  for (let month = 1; month <= currentMonth; month++) {
+    const monthStr = month.toString().padStart(2, '0');
     
-    // For each month, include all days (1-31)
-    // Note: We're including all possible days, the SFTP will only return what exists
-    for (let day = 1; day <= 31; day++) {
+    // For current month, only scan up to current day
+    // For past months, scan all possible days (1-31)
+    const maxDay = month === currentMonth ? currentDay : 31;
+    
+    for (let day = 1; day <= maxDay; day++) {
       const dayStr = day.toString().padStart(2, '0');
-      directories.push(`${baseDir}/06/${dayStr}`);
+      directories.push(`${baseDir}/${monthStr}/${dayStr}`);
     }
-  // }
+  }
   
-  // You could also add previous year's directories if needed
-  // const prevYear = currentYear - 1;
-  // const prevYearBase = `./tsa-dialler/${prevYear}`;
-  // Add similar logic for previous year if required
-  
+  console.log(`Scanning ${directories.length} directories from ${currentYear}/01/01 to ${currentYear}/${currentMonth.toString().padStart(2, '0')}/${currentDay.toString().padStart(2, '0')}`);
   return directories;
 };
 
@@ -110,16 +112,17 @@ export async function GET() {
             }
             
             // Extract date components from the directory path
+            // Expected format: ./2025/MM/DD
             const pathParts = directory.split('/');
             const year = pathParts[pathParts.length - 3];
             const month = pathParts[pathParts.length - 2];
             const day = pathParts[pathParts.length - 1];
             
-            // Format the file list to include only regular files that end with 'a.wav'
+            // Format the file list to include only .wav files
             const dirFiles = list
               .filter(
                 (item) =>
-                  item.attrs.isFile() && item.filename.endsWith("agnt.wav")
+                  item.attrs.isFile() && item.filename.toLowerCase().endsWith(".wav")
               )
               .map((item) => ({
                 filename: item.filename,
@@ -135,6 +138,8 @@ export async function GET() {
             // Add this directory's files to our collection
             allFiles.push(...dirFiles);
             
+            console.log(`Found ${dirFiles.length} .wav files in ${directory}`);
+            
             // If we've processed all directories, return the results
             if (pendingDirectories === 0) {
               // Sort files by date (newest first)
@@ -142,6 +147,7 @@ export async function GET() {
                 return new Date(b.modifyTime).getTime() - new Date(a.modifyTime).getTime();
               });
               
+              console.log(`Total files found: ${allFiles.length}`);
               resolve(NextResponse.json({ files: allFiles }, { status: 200 }));
               conn.end();
             }
@@ -167,6 +173,13 @@ export async function POST(request: Request) {
   
   if (!filePath) {
     return NextResponse.json({ error: "File path is required" }, { status: 400 });
+  }
+  
+  // Validate that the path follows the expected structure
+  const pathRegex = /^\.\/\d{4}\/\d{2}\/\d{2}\/.*\.wav$/i;
+  if (!pathRegex.test(filePath)) {
+    console.warn(`File path doesn't match expected structure: ${filePath}`);
+    // Still proceed, but log the warning
   }
   
   return new Promise<NextResponse>((resolve, reject) => {
@@ -197,12 +210,12 @@ export async function POST(request: Request) {
           // Extract filename from path
           const fileName = filePath.split('/').pop() || 'download.wav';
           
-          // Return file with appropriate headers
+          // Return file with appropriate headers for WAV files
           resolve(
             new NextResponse(fileBuffer, {
               status: 200,
               headers: {
-                'Content-Type': 'audio/mpeg',
+                'Content-Type': 'audio/wav',
                 'Content-Disposition': `attachment; filename="${fileName}"`,
               },
             })
@@ -211,10 +224,12 @@ export async function POST(request: Request) {
           conn.end();
         });
         
-        readStream.on('error', () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        readStream.on('error', (fileErr: { message: any; }) => {
+          console.error(`Error reading file ${filePath}:`, fileErr);
           reject(
             NextResponse.json(
-              { error: "Error reading file" },
+              { error: `Error reading file: ${fileErr.message}` },
               { status: 500 }
             )
           );

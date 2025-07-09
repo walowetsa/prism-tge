@@ -115,11 +115,11 @@ export async function GET() {
             const month = pathParts[pathParts.length - 2];
             const day = pathParts[pathParts.length - 1];
             
-            // Format the file list to include only regular files that end with 'agnt.mp3'
+            // Format the file list to include only regular files that end with 'a.wav'
             const dirFiles = list
               .filter(
                 (item) =>
-                  item.attrs.isFile() && item.filename.endsWith("agnt.mp3")
+                  item.attrs.isFile() && item.filename.endsWith("agnt.wav")
               )
               .map((item) => ({
                 filename: item.filename,
@@ -195,7 +195,7 @@ export async function POST(request: Request) {
           const fileBuffer = Buffer.concat(fileData);
           
           // Extract filename from path
-          const fileName = filePath.split('/').pop() || 'download.mp3';
+          const fileName = filePath.split('/').pop() || 'download.wav';
           
           // Return file with appropriate headers
           resolve(

@@ -233,7 +233,7 @@ async function uploadToAssemblyAI(audioBlob: Blob | string, apiKey: string) {
 
   console.log("Uploading blob to AssemblyAI...");
   const uploadFormData = new FormData();
-  uploadFormData.append("file", audioBlob, "audio.mp3");
+  uploadFormData.append("file", audioBlob, "audio.wav");
 
   const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
     method: "POST",

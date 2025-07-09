@@ -71,10 +71,10 @@ function getServerUrl(): string {
 }
 
 /**
- * OPTIMIZED: Efficient chunked download with retry logic for small files
+ * FIXED: Realistic download with proper retry logic for call recordings
  */
 async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
-  console.log("🔽 Starting efficient chunked download for:", sftpFilename);
+  console.log("🔽 Starting call recording download for:", sftpFilename);
   
   const serverUrl = getServerUrl();
   const decodedFilename = decodeURIComponent(sftpFilename);
@@ -82,17 +82,20 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
   
   console.log("📡 Download URL:", downloadUrl);
 
-  // Retry configuration for small files
-  const maxRetries = 3;
-  const retryDelays = [1000, 2000, 5000]; // 1s, 2s, 5s
+  // FIXED: Realistic retry configuration for call recordings (not "small files")
+  const maxRetries = 2; // Reduced retries since timeouts are now longer
+  const retryDelays = [2000, 5000]; // 2s, 5s
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       console.log(`📥 Download attempt ${attempt + 1}/${maxRetries}`);
       
-      // Shorter timeout for small files (30 seconds should be plenty)
+      // FIXED: Realistic timeout for call recordings (2 minutes)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const timeoutId = setTimeout(() => {
+        console.log(`⏰ Download timeout after 2 minutes for attempt ${attempt + 1}`);
+        controller.abort();
+      }, 120000); // 2 minutes for call recordings
 
       const response = await fetch(downloadUrl, {
         method: 'GET',
@@ -114,14 +117,10 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
       const contentLength = response.headers.get('content-length');
       if (contentLength) {
         const sizeInMB = parseInt(contentLength) / (1024 * 1024);
-        console.log(`📊 File size: ${sizeInMB.toFixed(2)}MB`);
-        
-        if (sizeInMB > 50) { // Sanity check for "small" files
-          console.warn(`⚠️ File larger than expected: ${sizeInMB.toFixed(2)}MB`);
-        }
+        console.log(`📊 Call recording size: ${sizeInMB.toFixed(2)}MB`);
       }
 
-      // Read the response as a blob (most efficient for binary data)
+      // Read the response as a blob
       const audioBlob = await response.blob();
       
       console.log(`✅ Downloaded successfully: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
@@ -131,14 +130,21 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
         throw new Error("Downloaded file is empty");
       }
       
-      if (audioBlob.size < 1000) { // Less than 1KB is suspicious for audio
-        throw new Error(`Downloaded file too small: ${audioBlob.size} bytes`);
+      // FIXED: More realistic size check for call recordings
+      if (audioBlob.size < 10000) { // Less than 10KB is suspicious for call recordings
+        throw new Error(`Downloaded file too small for a call recording: ${audioBlob.size} bytes`);
       }
 
       return audioBlob;
 
     } catch (error) {
       console.error(`❌ Download attempt ${attempt + 1} failed:`, error);
+      
+      // FIXED: Don't retry on AbortError - it means we hit our timeout
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log(`⏰ Timeout reached on attempt ${attempt + 1}, not retrying timeout errors`);
+        throw new Error(`Download timed out after 2 minutes. Call recording may be too large or server is slow.`);
+      }
       
       if (attempt === maxRetries - 1) {
         // Last attempt failed
@@ -156,7 +162,7 @@ async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
 }
 
 /**
- * OPTIMIZED: Fast upload to AssemblyAI with proper blob handling
+ * FIXED: Upload to AssemblyAI with realistic timeout
  */
 async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilename?: string): Promise<string> {
   console.log("⬆️ Uploading to AssemblyAI:", {
@@ -188,13 +194,19 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
   
   formData.append("file", optimizedBlob, filename);
 
-  // Reasonable timeout for small files (2 minutes max)
-  const timeout = 120000; // 2 minutes should be plenty for small files
+  // FIXED: Realistic timeout based on file size
+  const sizeInMB = audioBlob.size / (1024 * 1024);
+  const baseTimeout = 60000; // 1 minute base
+  const timeoutPerMB = 30000; // 30 seconds per MB
+  const timeout = baseTimeout + (sizeInMB * timeoutPerMB); // Scale with file size
+  const maxTimeout = 10 * 60 * 1000; // 10 minutes max
 
-  console.log(`⏰ Upload timeout set to ${timeout / 1000} seconds`);
+  const finalTimeout = Math.min(timeout, maxTimeout);
+
+  console.log(`⏰ Upload timeout set to ${finalTimeout / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const timeoutId = setTimeout(() => controller.abort(), finalTimeout);
 
   try {
     const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
@@ -223,7 +235,7 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
     clearTimeout(timeoutId);
     
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Upload timed out after ${timeout / 1000} seconds`);
+      throw new Error(`Upload timed out after ${finalTimeout / 1000} seconds`);
     }
     
     throw error;
@@ -231,7 +243,7 @@ async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilen
 }
 
 /**
- * OPTIMIZED: Try direct URL first, then efficient download strategy
+ * FIXED: Try direct URL first with realistic timeout, then download approach
  */
 async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promise<string> {
   console.log("🎯 Starting optimized audio URL resolution for:", sftpFilename);
@@ -240,13 +252,13 @@ async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promi
   const decodedFilename = decodeURIComponent(sftpFilename);
   const directUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(decodedFilename)}`;
   
-  // STEP 1: Quick direct URL test (10 second timeout)
+  // STEP 1: Quick direct URL test (30 second timeout)
   try {
     console.log("🚀 Testing direct URL approach...");
     
     const headResponse = await fetch(directUrl, { 
       method: 'HEAD',
-      signal: AbortSignal.timeout(10000)
+      signal: AbortSignal.timeout(30000) // 30 seconds for HEAD request
     });
     
     if (headResponse.ok) {
@@ -272,7 +284,7 @@ async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promi
 }
 
 /**
- * Topic categorization with shorter timeout
+ * Topic categorization with appropriate timeout
  */
 async function performTopicCategorization(transcriptData: any) {
   try {
@@ -282,7 +294,7 @@ async function performTopicCategorization(transcriptData: any) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: transcriptData }),
-      signal: AbortSignal.timeout(20000), // 20 seconds for categorization
+      signal: AbortSignal.timeout(30000), // 30 seconds for categorization
     });
 
     if (!response.ok) {
@@ -309,8 +321,8 @@ async function performTopicCategorization(transcriptData: any) {
 
 export async function POST(request: Request) {
   const requestStartTime = Date.now();
-  // Shorter timeout for small files - 3 minutes should be plenty
-  const MAX_REQUEST_TIME = 3 * 60 * 1000; 
+  // FIXED: Realistic timeout for call recording transcription - 8 minutes
+  const MAX_REQUEST_TIME = 8 * 60 * 1000; 
   
   try {
     const body = await request.json();
@@ -323,7 +335,7 @@ export async function POST(request: Request) {
       callData = null,
     } = body;
 
-    console.log("🎬 TRANSCRIPTION REQUEST START:", {
+    console.log("🎬 CALL RECORDING TRANSCRIPTION START:", {
       filename,
       isDirectSftpFile,
       sftpFilename,
@@ -395,7 +407,7 @@ export async function POST(request: Request) {
         punctuate: true,
         format_text: true,
       }),
-      signal: AbortSignal.timeout(15000), // 15 seconds for submission
+      signal: AbortSignal.timeout(20000), // 20 seconds for submission
     });
 
     if (!transcriptResponse.ok) {
@@ -410,13 +422,13 @@ export async function POST(request: Request) {
     const { id } = await transcriptResponse.json();
     console.log(`✅ Transcription job created: ${id}`);
 
-    // PHASE 3: Poll for results (shorter polling for small files)
+    // PHASE 3: Poll for results (realistic polling for call recordings)
     console.log("⏳ PHASE 3: Polling for results...");
     
     let transcript;
     let status = "processing";
     let attempts = 0;
-    const maxAttempts = 90; // 3 minutes at 2-second intervals
+    const maxAttempts = 240; // 8 minutes at 2-second intervals
     const pollInterval = 2000;
 
     while ((status === "processing" || status === "queued") && attempts < maxAttempts) {
@@ -444,8 +456,8 @@ export async function POST(request: Request) {
         transcript = await statusResponse.json();
         status = transcript.status;
         
-        // Log progress every 15 attempts (30 seconds)
-        if (attempts % 15 === 0) {
+        // Log progress every 30 attempts (60 seconds)
+        if (attempts % 30 === 0) {
           console.log(`📊 Status: ${status}, attempt: ${attempts}/${maxAttempts}, elapsed: ${Math.round(elapsed/1000)}s`);
         }
         
@@ -523,7 +535,7 @@ export async function POST(request: Request) {
     } else {
       console.error("⏰ Transcription timed out");
       return NextResponse.json({
-        error: "Transcription timed out. Please try again.",
+        error: "Transcription timed out. Call recording processing may take longer than expected.",
         status: "timeout",
         transcription_id: id,
       }, { status: 504 });

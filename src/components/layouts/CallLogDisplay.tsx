@@ -54,11 +54,11 @@ const CallLogDisplay = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // OPTIMIZED: Transcription state for small files
+  // FIXED: Transcription state for call recordings
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
   const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 2; // Increased to 2 for small files
+  const maxConcurrentTranscriptions = 2; // Keep at 2 for server stability
   
   const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
@@ -161,7 +161,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // OPTIMIZED: Audio download for small files
+  // FIXED: Audio download for call recordings
   const handleAudioDownload = async (log: CallLog) => {
     if (!log.recording_location) {
       alert("No audio file available for this call");
@@ -175,13 +175,13 @@ const CallLogDisplay = ({
     setDownloadingAudio(prev => [...prev, contactId]);
 
     try {
-      console.log(`🎵 Downloading small audio file for: ${contactId}`);
+      console.log(`🎵 Downloading call recording for: ${contactId}`);
 
       const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
       
-      // Shorter timeout for small files
+      // FIXED: Realistic timeout for call recordings (3 minutes)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 1 minute
+      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes
 
       const response = await fetch(downloadUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
@@ -217,7 +217,7 @@ const CallLogDisplay = ({
       console.error(`❌ Download error for ${contactId}:`, error);
       
       if (error instanceof Error && error.name === 'AbortError') {
-        alert('Download timed out. Please try again.');
+        alert('Download timed out after 3 minutes. Call recording may be large or server is slow.');
       } else {
         alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
@@ -290,7 +290,7 @@ const CallLogDisplay = ({
       const text = await response.text();
       
       if (text.includes('504') || text.includes('Gateway Time-out')) {
-        throw new Error("Request timed out. Small files should process quickly - please try again.");
+        throw new Error("Request timed out. Call recording processing takes time - please try again.");
       } else if (text.includes('502') || text.includes('Bad Gateway')) {
         throw new Error("Server error. Please try again in a moment.");
       } else {
@@ -299,23 +299,23 @@ const CallLogDisplay = ({
     }
   };
 
-  // OPTIMIZED: Transcription for small files
+  // FIXED: Transcription for call recordings
   const initiateTranscription = useCallback(async (log: CallLog) => {
     if (!log.recording_location) return false;
 
     const contactId = log.contact_id;
     
-    // OPTIMIZED: Shorter timeout for small files (4 minutes)
+    // FIXED: Realistic timeout for call recordings (8 minutes)
     const controller = new AbortController();
     transcriptionControllers.current.set(contactId, controller);
     
     const timeoutId = setTimeout(() => {
-      console.log(`⏰ Aborting transcription for ${contactId} - 4 minute timeout`);
+      console.log(`⏰ Aborting transcription for ${contactId} - 8 minute timeout`);
       controller.abort();
-    }, 4 * 60 * 1000);
+    }, 8 * 60 * 1000);
 
     try {
-      console.log(`🚀 Starting transcription for small file: ${contactId}`);
+      console.log(`🚀 Starting transcription for call recording: ${contactId}`);
       
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
@@ -337,21 +337,21 @@ const CallLogDisplay = ({
         throw new Error("Could not extract filename");
       }
 
-      console.log(`📁 Processing small file: ${filename}`);
+      console.log(`📁 Processing call recording: ${filename}`);
 
-      // OPTIMIZED: Faster progress updates for small files
+      // FIXED: Realistic progress updates for call recordings
       const progressInterval = setInterval(() => {
         setCallLogs((prevLogs) =>
           prevLogs.map((l) => {
             if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
               const currentProgress = l.transcriptionProgress || 0;
-              const newProgress = Math.min(90, currentProgress + 3); // Faster progress
+              const newProgress = Math.min(85, currentProgress + 2); // Slower, more realistic progress
               return { ...l, transcriptionProgress: newProgress };
             }
             return l;
           })
         );
-      }, 2000); // Every 2 seconds
+      }, 5000); // Every 5 seconds
 
       progressIntervals.current.set(contactId, progressInterval);
 
@@ -431,9 +431,9 @@ const CallLogDisplay = ({
       
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          errorMessage = "Transcription timed out after 4 minutes. Please try again.";
+          errorMessage = "Transcription timed out after 8 minutes. Call recording may be very large.";
         } else if (error.message.includes('504') || error.message.includes('timeout')) {
-          errorMessage = "Request timed out. Please try again.";
+          errorMessage = "Request timed out. Call recording processing takes time - please try again.";
         } else {
           errorMessage = error.message;
         }
@@ -566,10 +566,10 @@ const CallLogDisplay = ({
     fetchCallLogs();
   }, [selectedDateRange, checkSupabase]);
 
-  // OPTIMIZED: Auto-queue more aggressively for small files
+  // FIXED: Conservative auto-queue for call recordings
   useEffect(() => {
     if (!loading && callLogs.length > 0) {
-      const maxAutoQueue = 10; // Increased for small files
+      const maxAutoQueue = 5; // Conservative for call recordings
       let queued = 0;
 
       const totalInProgress = transcriptionQueue.length + activeTranscriptions.size;
@@ -585,7 +585,7 @@ const CallLogDisplay = ({
             !failedTranscriptions.has(log.contact_id) &&
             queued < (maxAutoQueue - totalInProgress)
           ) {
-            console.log(`📋 Auto-queueing small file: ${log.contact_id}`);
+            console.log(`📋 Auto-queueing call recording: ${log.contact_id}`);
             queueTranscription(log.contact_id);
             queued++;
           }
@@ -689,7 +689,7 @@ const CallLogDisplay = ({
                 )}
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                ⚡ Optimized for small files - processing up to 2 simultaneously
+                📞 Processing call recordings - may take several minutes per file
               </div>
             </div>
           )}

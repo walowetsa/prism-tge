@@ -83,6 +83,7 @@ export async function GET(request: Request) {
       
       // Check various formats - full awareness of possible path patterns
       const knownPrefixes = [
+        './2025/', 
         './tsa-dialler/', 
         '/tsa-dialler/', 
         'tsa-dialler/', 

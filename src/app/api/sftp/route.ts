@@ -37,7 +37,7 @@ const getDirectoriesToScan = () => {
   const directories = [];
   
   // Scan the current year
-  const baseDir = `/${currentYear}`;
+  const baseDir = `./${currentYear}`;
   
   // Get all months up to current month (1-12)
   // for (let month = 1; month <= 12; month++) {
@@ -48,7 +48,7 @@ const getDirectoriesToScan = () => {
     // Note: We're including all possible days, the SFTP will only return what exists
     for (let day = 1; day <= 31; day++) {
       const dayStr = day.toString().padStart(2, '0');
-      directories.push(`${baseDir}/05/${dayStr}`);
+      directories.push(`${baseDir}/06/${dayStr}`);
     }
   // }
   

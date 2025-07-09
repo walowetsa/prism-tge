@@ -61,13 +61,13 @@ async function saveToSupabase(
 }
 
 /**
- * Helper function to validate audio file format
+ * Helper function to validate audio file format - IMPROVED VERSION
  */
-function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: string; details: string } {
+function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: string; details: string; extension: string } {
   const uint8Array = new Uint8Array(buffer);
   
   if (uint8Array.length < 12) {
-    return { isValid: false, fileType: "unknown", details: "File too small to be valid audio" };
+    return { isValid: false, fileType: "unknown", details: "File too small to be valid audio", extension: ".bin" };
   }
 
   // Check for WAV format (RIFF container with WAVE format)
@@ -75,7 +75,7 @@ function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: s
   const waveHeader = Array.from(uint8Array.slice(8, 12)).map(b => String.fromCharCode(b)).join('');
   
   if (riffHeader === 'RIFF' && waveHeader === 'WAVE') {
-    return { isValid: true, fileType: "audio/wav", details: "Valid WAV file" };
+    return { isValid: true, fileType: "audio/wav", details: "Valid WAV file", extension: ".wav" };
   }
 
   // Check for MP3 format
@@ -83,12 +83,12 @@ function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: s
     // MP3 files can start with ID3 tags or direct audio frames
     const id3Header = Array.from(uint8Array.slice(0, 3)).map(b => String.fromCharCode(b)).join('');
     if (id3Header === 'ID3') {
-      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file with ID3 tags" };
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file with ID3 tags", extension: ".mp3" };
     }
     
     // Check for MP3 frame sync (0xFF followed by 0xFB, 0xFA, or 0xF3, 0xF2)
     if (uint8Array[0] === 0xFF && (uint8Array[1] & 0xE0) === 0xE0) {
-      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file" };
+      return { isValid: true, fileType: "audio/mpeg", details: "Valid MP3 file", extension: ".mp3" };
     }
   }
 
@@ -96,7 +96,7 @@ function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: s
   if (uint8Array.length >= 4) {
     const oggHeader = Array.from(uint8Array.slice(0, 4)).map(b => String.fromCharCode(b)).join('');
     if (oggHeader === 'OggS') {
-      return { isValid: true, fileType: "audio/ogg", details: "Valid OGG file" };
+      return { isValid: true, fileType: "audio/ogg", details: "Valid OGG file", extension: ".ogg" };
     }
   }
 
@@ -104,7 +104,7 @@ function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: s
   if (uint8Array.length >= 8) {
     const m4aHeader = Array.from(uint8Array.slice(4, 8)).map(b => String.fromCharCode(b)).join('');
     if (m4aHeader === 'ftyp') {
-      return { isValid: true, fileType: "audio/mp4", details: "Valid M4A/MP4 audio file" };
+      return { isValid: true, fileType: "audio/mp4", details: "Valid M4A/MP4 audio file", extension: ".m4a" };
     }
   }
 
@@ -113,7 +113,8 @@ function validateAudioFile(buffer: ArrayBuffer): { isValid: boolean; fileType: s
   return { 
     isValid: false, 
     fileType: "application/octet-stream", 
-    details: `Unrecognized audio format. First 16 bytes: ${firstBytes}`
+    details: `Unrecognized audio format. First 16 bytes: ${firstBytes}`,
+    extension: ".bin"
   };
 }
 
@@ -194,8 +195,8 @@ async function getSftpAudioBuffer(sftpFilename: string): Promise<ArrayBuffer> {
 }
 
 /**
- * Helper function to upload audio to AssemblyAI using ArrayBuffer
- * Eliminates blob conversion which may cause issues
+ * FIXED: Helper function to upload audio to AssemblyAI using ArrayBuffer
+ * Major improvements in buffer handling and file creation
  */
 async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, originalFilename?: string) {
   console.log("⬆️ Uploading to AssemblyAI...");
@@ -211,7 +212,7 @@ async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, orig
   }
 
   try {
-    // Re-validate the audio file format before upload
+    // FIXED: Re-validate the audio file format before upload with improved validation
     const validation = validateAudioFile(audioBuffer);
     console.log(`🔍 Pre-upload validation:`, validation);
 
@@ -219,34 +220,36 @@ async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, orig
       throw new Error(`Cannot upload invalid audio file: ${validation.details}`);
     }
     
-    // Determine proper file extension and MIME type
-    let fileExtension = '.wav';
-    let mimeType = validation.fileType;
+    // FIXED: Simplified and more reliable filename and MIME type handling
+    const mimeType = validation.fileType;
+    const detectedExtension = validation.extension;
     
-    if (validation.fileType === 'audio/mpeg') {
-      fileExtension = '.mp3';
-    } else if (validation.fileType === 'audio/ogg') {
-      fileExtension = '.ogg';
-    } else if (validation.fileType === 'audio/mp4') {
-      fileExtension = '.m4a';
+    // FIXED: Better filename handling - preserve original if valid, otherwise use detected format
+    let filename: string;
+    
+    if (originalFilename) {
+      // Extract base name without extension
+      const baseName = originalFilename.replace(/\.[^/.]+$/, '') || originalFilename;
+      // Always use the detected extension for consistency
+      filename = `${baseName}${detectedExtension}`;
+    } else {
+      filename = `audio${detectedExtension}`;
     }
     
-    // Create proper filename with correct extension
-    let filename = originalFilename || 'audio.wav';
-    if (originalFilename && !originalFilename.includes('.')) {
-      filename = originalFilename + fileExtension;
-    } else if (originalFilename && !originalFilename.endsWith(fileExtension)) {
-      // Replace extension if it doesn't match detected format
-      filename = originalFilename.replace(/\.[^/.]+$/, fileExtension);
-    }
+    console.log(`📋 Final filename: ${filename} with MIME type: ${mimeType}`);
     
-    console.log(`📋 Using filename: ${filename} with MIME type: ${mimeType}`);
-    
-    // Create a File object directly from the ArrayBuffer
-    const audioFile = new File([audioBuffer], filename, { 
-      type: mimeType,
-      lastModified: Date.now()
+    // FIXED: Create File object with proper Uint8Array instead of ArrayBuffer directly
+    // This ensures better compatibility across browsers and environments
+    const uint8Array = new Uint8Array(audioBuffer);
+    const audioFile = new File([uint8Array], filename, { 
+      type: mimeType
+      // REMOVED: lastModified as it's not necessary and can cause issues
     });
+    
+    // FIXED: Validate File object was created correctly
+    if (audioFile.size !== audioBuffer.byteLength) {
+      throw new Error(`File object size mismatch: expected ${audioBuffer.byteLength}, got ${audioFile.size}`);
+    }
     
     // Create FormData
     const uploadFormData = new FormData();
@@ -258,9 +261,10 @@ async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, orig
     console.log(`   - File size: ${audioFile.size} bytes`);
     console.log(`   - MIME type: ${audioFile.type}`);
     console.log(`   - Detected format: ${validation.details}`);
+    console.log(`   - Buffer matches file size: ${audioBuffer.byteLength === audioFile.size}`);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds for larger files
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // INCREASED: 120 seconds for larger files
 
     console.log(`🚀 Starting upload to AssemblyAI...`);
 
@@ -268,7 +272,7 @@ async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, orig
       method: "POST",
       headers: {
         Authorization: apiKey,
-        // Don't set Content-Type manually - let browser set it with boundary for multipart/form-data
+        // FIXED: Explicitly avoid setting Content-Type to let browser handle multipart boundary
       },
       body: uploadFormData,
       signal: controller.signal,
@@ -290,32 +294,51 @@ async function uploadToAssemblyAI(audioBuffer: ArrayBuffer, apiKey: string, orig
         errorData = { error: errorText };
       }
       
-      // Provide more specific error information
+      // IMPROVED: More specific error information with troubleshooting
       if (uploadResponse.status === 400) {
-        console.error("🚨 Bad Request - likely audio format issue");
+        console.error("🚨 Bad Request - Audio format or file issue");
         console.error("🔍 File validation details:", validation);
-        console.error("🔍 Check if AssemblyAI supports this audio format");
+        console.error("🔍 File object details:", {
+          name: audioFile.name,
+          size: audioFile.size,
+          type: audioFile.type,
+          lastModified: audioFile.lastModified
+        });
+        throw new Error(`AssemblyAI rejected the file (400): ${JSON.stringify(errorData)}. Check audio format compatibility.`);
       } else if (uploadResponse.status === 413) {
         console.error("🚨 File too large for AssemblyAI");
+        throw new Error(`File too large (413): ${JSON.stringify(errorData)}. Maximum file size exceeded.`);
+      } else if (uploadResponse.status === 401) {
+        console.error("🚨 Authentication failed");
+        throw new Error(`Authentication failed (401): Check AssemblyAI API key.`);
       }
       
-      throw new Error(`AssemblyAI upload failed: ${uploadResponse.status} - ${JSON.stringify(errorData)}`);
+      throw new Error(`AssemblyAI upload failed (${uploadResponse.status}): ${JSON.stringify(errorData)}`);
     }
 
     const uploadData = await uploadResponse.json();
     console.log("✅ Upload successful. Upload URL:", uploadData.upload_url);
     
-    // Validate we got a proper upload URL
-    if (!uploadData.upload_url) {
-      throw new Error("AssemblyAI upload succeeded but no upload_url returned");
+    // FIXED: Better validation of upload response
+    if (!uploadData.upload_url || typeof uploadData.upload_url !== 'string') {
+      console.error("❌ Invalid upload response:", uploadData);
+      throw new Error("AssemblyAI upload succeeded but returned invalid upload_url");
+    }
+    
+    // FIXED: Validate upload URL format
+    try {
+      new URL(uploadData.upload_url);
+    } catch {
+      throw new Error(`AssemblyAI returned invalid upload URL: ${uploadData.upload_url}`);
     }
     
     return uploadData.upload_url;
   } catch (error) {
     if (error instanceof Error) {
       if (error.name === 'AbortError') {
-        throw new Error("AssemblyAI upload timed out after 90 seconds");
+        throw new Error("AssemblyAI upload timed out after 120 seconds");
       }
+      // FIXED: Preserve original error message for better debugging
       throw new Error(`AssemblyAI upload error: ${error.message}`);
     }
     throw new Error("Unknown AssemblyAI upload error");
@@ -383,7 +406,7 @@ export async function POST(request: Request) {
         const originalFilename = sftpFilename.split('/').pop() || filename;
         console.log(`📝 Using filename for upload: ${originalFilename}`);
         
-        // Upload to AssemblyAI using ArrayBuffer directly
+        // FIXED: Upload to AssemblyAI using improved buffer handling
         fileToTranscribe = await uploadToAssemblyAI(audioBuffer, apiKey, originalFilename);
         console.log("✅ AssemblyAI upload successful");
       } else if (audioUrl) {
@@ -396,17 +419,43 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error("❌ Error processing audio:", error);
       
-      // Provide more specific error information for debugging
+      // IMPROVED: More specific error information for debugging
       let errorDetails = "Failed during audio acquisition or upload phase";
+      let troubleshooting: string[] = [];
+      
       if (error instanceof Error) {
         if (error.message.includes("SFTP download")) {
           errorDetails = "SFTP download failed - check if file exists and is accessible";
+          troubleshooting = [
+            "1. Verify the SFTP file path is correct",
+            "2. Check SFTP server connectivity",
+            "3. Ensure file permissions allow reading",
+            "4. Check if file exists at the specified location"
+          ];
         } else if (error.message.includes("AssemblyAI upload")) {
-          errorDetails = "AssemblyAI upload failed - likely audio format issue";
-        } else if (error.message.includes("empty")) {
-          errorDetails = "Audio file is empty or corrupted";
-        } else if (error.message.includes("WAV headers")) {
-          errorDetails = "Audio file doesn't appear to be a valid WAV file";
+          errorDetails = "AssemblyAI upload failed - likely audio format or API issue";
+          troubleshooting = [
+            "1. Check if audio format is supported by AssemblyAI",
+            "2. Verify AssemblyAI API key is valid",
+            "3. Check file size is within AssemblyAI limits",
+            "4. Ensure audio file is not corrupted"
+          ];
+        } else if (error.message.includes("empty") || error.message.includes("size")) {
+          errorDetails = "Audio file is empty, corrupted, or too small";
+          troubleshooting = [
+            "1. Check if the source file is complete",
+            "2. Verify file is not truncated during transfer",
+            "3. Ensure file size is at least 1KB",
+            "4. Check SFTP transfer completed successfully"
+          ];
+        } else if (error.message.includes("Invalid audio file format")) {
+          errorDetails = "Audio file format is not supported or corrupted";
+          troubleshooting = [
+            "1. Supported formats: WAV, MP3, OGG, M4A",
+            "2. Check if file headers are intact",
+            "3. Try converting to WAV format",
+            "4. Verify file is not corrupted"
+          ];
         }
       }
       
@@ -414,15 +463,7 @@ export async function POST(request: Request) {
         { 
           error: error instanceof Error ? error.message : "Error processing audio file",
           details: errorDetails,
-          troubleshooting: [
-            "1. Check if the file exists on SFTP server",
-            "2. Verify file is a valid audio format (WAV, MP3, OGG, M4A)",
-            "3. Ensure file size > 1KB and is not corrupted",
-            "4. Check if SFTP server is returning an error page instead of the audio file",
-            "5. Verify the SFTP download endpoint is working correctly",
-            "6. Check server logs for detailed error information",
-            "7. Try downloading a small test file first to verify SFTP connectivity"
-          ]
+          troubleshooting
         },
         { status: 500 }
       );

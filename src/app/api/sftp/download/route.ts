@@ -101,7 +101,7 @@ export async function GET(request: Request) {
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const day = now.getDate().toString().padStart(2, '0');
         
-        remotePath = `./tsa-dialler/${year}/${month}/${day}/${filename}`;
+        remotePath = `./${year}/${month}/${day}/${filename}`;
         console.log(`No path prefix detected, using current date path: ${remotePath}`);
       } else {
         console.log(`Using provided path: ${remotePath}`);
@@ -128,8 +128,8 @@ export async function GET(request: Request) {
         console.error("File read error:", err);
         
         // Try a fallback path if the first attempt fails
-        if (!remotePath.includes("2025/05/20")) {
-          const fallbackPath = `./tsa-dialler/2025/05/20/${filename.split('/').pop()}`;
+        if (!remotePath.includes("2025/06/01")) {
+          const fallbackPath = `./2025/06/01/${filename.split('/').pop()}`;
           console.log(`First path failed, trying fallback: ${fallbackPath}`);
           
           const fallbackStream = sftp.createReadStream(fallbackPath);

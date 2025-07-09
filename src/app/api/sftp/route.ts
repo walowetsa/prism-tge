@@ -37,7 +37,7 @@ const getDirectoriesToScan = () => {
   const directories = [];
   
   // Scan the current year
-  const baseDir = `./tsa-dialler/${currentYear}`;
+  const baseDir = `./${currentYear}`;
   
   // Get all months up to current month (1-12)
   // for (let month = 1; month <= 12; month++) {

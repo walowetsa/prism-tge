@@ -80,58 +80,73 @@ function getAudioMimeType(buffer: Buffer, filename: string): string {
   return 'audio/wav';
 }
 
-// Simplified path construction - try fewer, more likely paths
+// IMPROVED: Path construction with better URL decoding
 function constructSftpPath(filename: string): string[] {
   const possiblePaths = [];
   
+  // FIXED: First decode any URL encoding in the filename
+  let decodedFilename = filename;
+  try {
+    decodedFilename = decodeURIComponent(filename);
+    console.log(`📝 Decoded filename: ${filename} -> ${decodedFilename}`);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  } catch (error) {
+    console.log(`⚠️ Could not decode filename, using as-is: ${filename}`);
+    decodedFilename = filename;
+  }
+  
   // If filename already has path structure, use it directly
-  if (filename.includes('/') || filename.startsWith('./')) {
-    let cleanPath = filename;
+  if (decodedFilename.includes('/') || decodedFilename.startsWith('./')) {
+    let cleanPath = decodedFilename;
     
     // Clean up known prefixes
     if (cleanPath.startsWith('amazon-connect-b1a9c08821e5/')) {
       cleanPath = cleanPath.replace('amazon-connect-b1a9c08821e5/', '');
     }
     
+    // Handle different path formats
     if (!cleanPath.startsWith('./') && !cleanPath.startsWith('/')) {
       cleanPath = `./${cleanPath}`;
     }
     
     possiblePaths.push(cleanPath);
+    
+    // Also try without the leading ./
+    if (cleanPath.startsWith('./')) {
+      possiblePaths.push(cleanPath.substring(2));
+    }
   }
   
-  // Try current date structure
+  // Extract just the filename for date-based searches
+  const justFilename = decodedFilename.split('/').pop() || decodedFilename;
+  
+  // Try current date structure and previous days
   const currentDate = new Date();
-  const currentYear = currentDate.getFullYear();
-  const currentMonth = currentDate.getMonth() + 1;
-  const currentDay = currentDate.getDate();
   
-  const justFilename = filename.split('/').pop() || filename;
-  
-  // Current date path
-  possiblePaths.push(
-    `./${currentYear}/${currentMonth.toString().padStart(2, '0')}/${currentDay.toString().padStart(2, '0')}/${justFilename}`
-  );
-  
-  // Try previous 3 days (most common case for recent files)
-  for (let daysBack = 1; daysBack <= 3; daysBack++) {
-    const pastDate = new Date(currentDate);
-    pastDate.setDate(currentDate.getDate() - daysBack);
+  // Try current date and previous 7 days (increased from 3)
+  for (let daysBack = 0; daysBack <= 7; daysBack++) {
+    const targetDate = new Date(currentDate);
+    targetDate.setDate(currentDate.getDate() - daysBack);
     
-    const year = pastDate.getFullYear();
-    const month = pastDate.getMonth() + 1;
-    const day = pastDate.getDate();
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    const day = targetDate.getDate();
     
-    possiblePaths.push(
-      `./${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}/${justFilename}`
-    );
+    const datePath = `${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}`;
+    
+    // Try various path combinations
+    possiblePaths.push(`./${datePath}/${justFilename}`);
+    possiblePaths.push(`${datePath}/${justFilename}`);
   }
   
   // Try without date structure (direct file access)
   possiblePaths.push(`./${justFilename}`);
   possiblePaths.push(justFilename);
   
-  return possiblePaths;
+  // Remove duplicates while preserving order
+  const uniquePaths = Array.from(new Set(possiblePaths));
+  
+  return uniquePaths;
 }
 
 export async function GET(request: Request) {
@@ -151,13 +166,9 @@ export async function GET(request: Request) {
   console.log("🔍 SFTP FILENAME DEBUG:");
   console.log("  Raw filename:", JSON.stringify(filename));
   console.log("  Filename length:", filename.length);
+  console.log("  Contains %3A (encoded :):", filename.includes('%3A'));
   console.log("  Ends with .wav:", filename.endsWith('.wav'));
-  console.log("  Ends with _UTC.wav:", filename.endsWith('_UTC.wav'));
-  console.log("  Last 20 chars:", JSON.stringify(filename.slice(-20)));
-  
-  // Check for any hidden characters or encoding issues
-  const lastChars = filename.slice(-10);
-  console.log("  Last 10 chars (hex):", Array.from(lastChars).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' '));
+  console.log("  Last 30 chars:", JSON.stringify(filename.slice(-30)));
   
   // URL decode check
   const decodedFilename = decodeURIComponent(filename);
@@ -185,7 +196,7 @@ export async function GET(request: Request) {
     const conn = new Client();
     let resolved = false;
 
-    // REDUCED: Overall request timeout - 90 seconds instead of 2 minutes
+    // INCREASED: Overall request timeout - 3 minutes for large files
     const overallTimeout = setTimeout(() => {
       if (!resolved) {
         console.error(`⏰ Overall request timeout after ${Date.now() - requestStart}ms`);
@@ -195,9 +206,9 @@ export async function GET(request: Request) {
           error: "Request timeout - file download took too long" 
         }, { status: 504 }));
       }
-    }, 90000); // 90 seconds instead of 120
+    }, 180000); // 3 minutes
 
-    // REDUCED: Connection timeout - 20 seconds instead of 30
+    // Connection timeout - 30 seconds
     const connectionTimeout = setTimeout(() => {
       if (!resolved) {
         console.error("⏰ SFTP connection timeout");
@@ -207,7 +218,7 @@ export async function GET(request: Request) {
           error: "SFTP connection timeout" 
         }, { status: 504 }));
       }
-    }, 20000); // 20 seconds instead of 30
+    }, 30000);
 
     conn.on("ready", () => {
       console.log("✅ SFTP connection ready");
@@ -229,11 +240,10 @@ export async function GET(request: Request) {
         const possiblePaths = constructSftpPath(filename);
         console.log(`🔍 Trying ${possiblePaths.length} possible paths`);
         
-        // DEBUGGING: Log all possible paths
-        console.log("🔍 ALL POSSIBLE PATHS:");
-        possiblePaths.forEach((path, index) => {
+        // DEBUGGING: Log first few possible paths
+        console.log("🔍 FIRST 5 POSSIBLE PATHS:");
+        possiblePaths.slice(0, 5).forEach((path, index) => {
           console.log(`  ${index + 1}. ${JSON.stringify(path)}`);
-          console.log(`     Length: ${path.length}, Ends with .wav: ${path.endsWith('.wav')}`);
         });
         
         let pathIndex = 0;
@@ -246,7 +256,8 @@ export async function GET(request: Request) {
               clearTimeout(overallTimeout);
               resolve(NextResponse.json({ 
                 error: "Audio file not found",
-                searchedPaths: possiblePaths.length
+                searchedPaths: possiblePaths.length,
+                lastPaths: possiblePaths.slice(-3) // Include last few paths tried
               }, { status: 404 }));
             }
             conn.end();
@@ -256,16 +267,24 @@ export async function GET(request: Request) {
           const currentPath = possiblePaths[pathIndex];
           console.log(`🔍 Trying path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
           
-          // Quick stat check
+          // Quick stat check with timeout
+          const statTimeout = setTimeout(() => {
+            console.log(`⏰ Stat timeout for path: ${currentPath}`);
+            pathIndex++;
+            tryNextPath();
+          }, 10000); // 10 second timeout for stat operations
+          
           sftp.stat(currentPath, (statErr, stats) => {
+            clearTimeout(statTimeout);
+            
             if (statErr) {
-              console.log(`❌ Path ${pathIndex + 1} not found`);
+              console.log(`❌ Path ${pathIndex + 1} not found: ${statErr.message}`);
               pathIndex++;
               tryNextPath();
               return;
             }
 
-            console.log(`📊 File found - Size: ${stats.size} bytes`);
+            console.log(`📊 File found - Size: ${stats.size} bytes (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
             
             // Basic size validation
             if (stats.size === 0) {
@@ -282,13 +301,10 @@ export async function GET(request: Request) {
               return;
             }
 
-            // IMPROVED: Check if file is too large and might cause timeout
+            // INCREASED: Allow larger files but warn about potential timeouts
             const sizeInMB = stats.size / (1024 * 1024);
-            if (sizeInMB > 150) { // Reduced from no limit to 150MB
-              console.log(`⚠️ File too large (${sizeInMB.toFixed(2)}MB), might cause timeout`);
-              pathIndex++;
-              tryNextPath();
-              return;
+            if (sizeInMB > 500) {
+              console.log(`⚠️ Very large file (${sizeInMB.toFixed(2)}MB), proceeding but may timeout`);
             }
 
             // File looks good, download it
@@ -300,8 +316,13 @@ export async function GET(request: Request) {
             
             const readStream = sftp.createReadStream(currentPath);
 
-            // IMPROVED: Download timeout based on file size (more conservative)
-            const downloadTimeoutMs = Math.min(60000, Math.max(20000, sizeInMB * 5000)); // 5s per MB, max 60s
+            // IMPROVED: Download timeout based on file size (more generous)
+            const baseTimeout = 30000; // 30 seconds base
+            const sizeBasedTimeout = sizeInMB * 10000; // 10 seconds per MB
+            const downloadTimeoutMs = Math.min(150000, baseTimeout + sizeBasedTimeout); // Max 2.5 minutes
+            
+            console.log(`⏰ Download timeout set to ${downloadTimeoutMs / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
+            
             const downloadTimeout = setTimeout(() => {
               console.error(`⏰ Download timeout after ${downloadTimeoutMs}ms`);
               readStream.destroy();
@@ -316,21 +337,38 @@ export async function GET(request: Request) {
             }, downloadTimeoutMs);
 
             readStream.on("error", (readErr: Error) => {
-              console.log(`❌ Read error: ${readErr.message}`);
+              console.log(`❌ Read error for path ${currentPath}: ${readErr.message}`);
               clearTimeout(downloadTimeout);
-              pathIndex++;
-              tryNextPath();
+              
+              // If it's a connection error, try next path
+              if (readErr.message.includes('No response from server') || 
+                  readErr.message.includes('Connection lost') ||
+                  readErr.message.includes('ECONN')) {
+                console.log(`🔄 Connection error, trying next path...`);
+                pathIndex++;
+                tryNextPath();
+              } else {
+                // Other errors might be more serious
+                if (!resolved) {
+                  resolved = true;
+                  clearTimeout(overallTimeout);
+                  resolve(NextResponse.json({ 
+                    error: `File read error: ${readErr.message}` 
+                  }, { status: 500 }));
+                }
+                conn.end();
+              }
             });
 
             readStream.on("data", (chunk: Buffer) => {
               fileBuffer.push(chunk);
               totalBytesReceived += chunk.length;
               
-              // Log progress for large files (reduced frequency)
-              if (stats.size > 10 * 1024 * 1024) { // 10MB+
+              // Log progress for large files (less frequent updates)
+              if (stats.size > 20 * 1024 * 1024) { // 20MB+
                 const progress = ((totalBytesReceived / stats.size) * 100).toFixed(1);
-                if (totalBytesReceived % (2 * 1024 * 1024) < chunk.length) { // Every 2MB instead of 1MB
-                  console.log(`📦 Progress: ${progress}%`);
+                if (totalBytesReceived % (5 * 1024 * 1024) < chunk.length) { // Every 5MB
+                  console.log(`📦 Progress: ${progress}% (${(totalBytesReceived / 1024 / 1024).toFixed(1)}MB/${(stats.size / 1024 / 1024).toFixed(1)}MB)`);
                 }
               }
             });
@@ -358,16 +396,11 @@ export async function GET(request: Request) {
                 return;
               }
 
-              // Get MIME type (less strict validation)
-              const mimeType = getAudioMimeType(audioBuffer, filename);
-              const downloadFilename = filename.split('/').pop() || filename;
+              // Get MIME type (ensure it's recognized as audio)
+              const mimeType = getAudioMimeType(audioBuffer, decodedFilename);
+              const downloadFilename = decodedFilename.split('/').pop() || decodedFilename;
               
               console.log(`✅ Serving as ${mimeType}: ${downloadFilename}`);
-              console.log(`🔍 Response headers will be:`, {
-                'Content-Type': mimeType,
-                'Content-Length': audioBuffer.length.toString(),
-                'Content-Disposition': `attachment; filename="${downloadFilename}"`,
-              });
 
               if (!resolved) {
                 resolved = true;
@@ -378,13 +411,15 @@ export async function GET(request: Request) {
                       "Content-Type": mimeType,
                       "Content-Length": audioBuffer.length.toString(),
                       "Content-Disposition": `attachment; filename="${downloadFilename}"`,
-                      "Cache-Control": "no-cache, no-store, max-age=0",
+                      "Cache-Control": "public, max-age=3600", // Allow caching for 1 hour
                       "Accept-Ranges": "bytes",
                       "X-File-Size": audioBuffer.length.toString(),
                       "X-Download-Time": `${downloadTime}ms`,
-                      // Add explicit audio headers for AssemblyAI
                       "X-Content-Type": mimeType, // Backup header
                       "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Disposition",
+                      // ADDED: Additional headers to ensure audio recognition
+                      "X-Audio-Format": mimeType,
+                      "Content-Description": "Audio File",
                     },
                   })
                 );
@@ -413,7 +448,7 @@ export async function GET(request: Request) {
       }
     });
 
-    // IMPROVED: Add connection event handlers for better debugging
+    // Add better connection event handling
     conn.on("close", () => {
       console.log("🔌 SFTP connection closed");
     });
@@ -422,10 +457,15 @@ export async function GET(request: Request) {
       console.log("🔚 SFTP connection ended");
     });
 
-    // Establish connection
+    // Establish connection with retry logic
     try {
       console.log("🔌 Establishing SFTP connection...");
-      conn.connect(sftpConfig);
+      conn.connect({
+        ...sftpConfig,
+        readyTimeout: 30000, // 30 second ready timeout
+        keepaliveInterval: 10000, // Send keepalive every 10 seconds
+        keepaliveCountMax: 3, // Allow 3 failed keepalive before disconnect
+      });
     } catch (e) {
       console.error("❌ Connection initiation error:", e);
       clearTimeout(connectionTimeout);

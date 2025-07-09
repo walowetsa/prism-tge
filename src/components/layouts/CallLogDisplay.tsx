@@ -58,7 +58,7 @@ const CallLogDisplay = ({
   const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
   const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
   const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 2; // Keep at 2 for server stability
+  const maxConcurrentTranscriptions = 1; // Keep at 2 for server stability
   
   const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());

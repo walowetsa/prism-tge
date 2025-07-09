@@ -107,7 +107,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Filename is required" }, { status: 400 });
   }
 
-  console.log(`🎵 STABLE SFTP download for: ${filename}`);
+  console.log(`🎵 NO-TIMEOUT SFTP download for: ${filename}`);
   
   const requestStart = Date.now();
 
@@ -137,41 +137,17 @@ export async function GET(request: Request) {
       }
     };
 
-    // Overall timeout - generous for call recordings
-    const overallTimeout = setTimeout(() => {
-      if (!resolved) {
-        console.error(`⏰ Overall timeout after ${Date.now() - requestStart}ms`);
-        resolved = true;
-        cleanup();
-        resolve(NextResponse.json({ 
-          error: "Download timeout - please try again" 
-        }, { status: 504 }));
-      }
-    }, 180000); // 3 minutes total
-
-    // Connection timeout
-    const connectionTimeout = setTimeout(() => {
-      if (!resolved) {
-        console.error("⏰ SFTP connection timeout");
-        resolved = true;
-        cleanup();
-        resolve(NextResponse.json({ 
-          error: "SFTP connection timeout" 
-        }, { status: 504 }));
-      }
-    }, 25000); // 25 seconds for connection
+    // NO TIMEOUTS! Let's see what happens without any time limits
 
     // Handle connection ready
     conn.on("ready", () => {
-      console.log("✅ SFTP connection ready");
-      clearTimeout(connectionTimeout);
+      console.log("✅ SFTP connection ready (NO TIMEOUTS)");
 
       conn.sftp((err, sftp) => {
         if (err) {
           console.error("❌ SFTP session error:", err);
           if (!resolved) {
             resolved = true;
-            clearTimeout(overallTimeout);
             cleanup();
             resolve(NextResponse.json({ error: "SFTP session error" }, { status: 500 }));
           }
@@ -180,7 +156,7 @@ export async function GET(request: Request) {
 
         sftpSession = sftp;
         const possiblePaths = constructSftpPath(filename);
-        console.log(`🔍 Searching ${possiblePaths.length} paths`);
+        console.log(`🔍 Searching ${possiblePaths.length} paths (NO TIMEOUTS)`);
         
         let pathIndex = 0;
         
@@ -191,7 +167,6 @@ export async function GET(request: Request) {
             console.error(`❌ File not found in ${possiblePaths.length} paths`);
             if (!resolved) {
               resolved = true;
-              clearTimeout(overallTimeout);
               cleanup();
               resolve(NextResponse.json({ 
                 error: "Audio file not found"
@@ -204,14 +179,9 @@ export async function GET(request: Request) {
           console.log(`🔍 Trying path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
           
           try {
-            // Use promises to avoid callback hell and improve error handling
+            // NO TIMEOUT on stat operation
             const stats = await new Promise<any>((resolveStats, rejectStats) => {
-              const statTimeout = setTimeout(() => {
-                rejectStats(new Error("Stat timeout"));
-              }, 15000); // 15 seconds for stat operation
-              
               sftp.stat(currentPath, (statErr, statsResult) => {
-                clearTimeout(statTimeout);
                 if (statErr) {
                   rejectStats(statErr);
                 } else {
@@ -221,7 +191,7 @@ export async function GET(request: Request) {
             });
 
             const sizeInMB = stats.size / (1024 * 1024);
-            console.log(`📊 Found file: ${sizeInMB.toFixed(2)}MB`);
+            console.log(`📊 Found file: ${sizeInMB.toFixed(2)}MB (NO TIMEOUT LIMITS)`);
             
             // Basic validation
             if (stats.size === 0) {
@@ -236,27 +206,22 @@ export async function GET(request: Request) {
               return tryNextPath();
             }
 
-            // Download the file
-            console.log(`📥 Downloading ${stats.size} bytes from: ${currentPath}`);
+            // Download the file - NO TIMEOUT!
+            console.log(`📥 Downloading ${stats.size} bytes (NO TIMEOUT LIMIT)`);
             
             const fileData = await new Promise<Buffer>((resolveDownload, rejectDownload) => {
               const fileBuffers: Buffer[] = [];
               let totalBytesReceived = 0;
               const downloadStartTime = Date.now();
               
-              // Create download timeout based on file size
-              const downloadTimeout = Math.min(60000 + (sizeInMB * 20000), 120000); // 1min + 20s per MB, max 2min
-              
-              const downloadTimeoutId = setTimeout(() => {
-                rejectDownload(new Error("Download timeout"));
-              }, downloadTimeout);
+              // NO DOWNLOAD TIMEOUT - let it run as long as needed
               
               const readStream = sftp.createReadStream(currentPath, {
                 highWaterMark: 256 * 1024, // 256KB chunks
               });
 
               readStream.on("error", (readErr: Error) => {
-                clearTimeout(downloadTimeoutId);
+                console.error(`❌ Stream error: ${readErr.message}`);
                 rejectDownload(readErr);
               });
 
@@ -264,23 +229,23 @@ export async function GET(request: Request) {
                 fileBuffers.push(chunk);
                 totalBytesReceived += chunk.length;
                 
-                // Progress logging
-                if (totalBytesReceived % (1024 * 1024) < chunk.length) { // Every 1MB
+                // Progress logging every 1MB
+                if (totalBytesReceived % (1024 * 1024) < chunk.length) {
                   const progress = ((totalBytesReceived / stats.size) * 100).toFixed(0);
-                  console.log(`📦 Progress: ${progress}%`);
+                  const elapsed = Date.now() - downloadStartTime;
+                  console.log(`📦 Progress: ${progress}% (${(totalBytesReceived / (1024 * 1024)).toFixed(1)}MB) - ${elapsed}ms elapsed`);
                 }
               });
 
               readStream.on("end", () => {
-                clearTimeout(downloadTimeoutId);
                 const audioBuffer = Buffer.concat(fileBuffers);
                 const downloadTime = Date.now() - downloadStartTime;
                 
-                console.log(`✅ Downloaded: ${audioBuffer.length} bytes in ${downloadTime}ms`);
+                console.log(`✅ Downloaded: ${audioBuffer.length} bytes in ${downloadTime}ms (NO TIMEOUTS)`);
                 
                 // Verify size
                 if (audioBuffer.length !== stats.size) {
-                  rejectDownload(new Error("Size mismatch"));
+                  rejectDownload(new Error(`Size mismatch: expected ${stats.size}, got ${audioBuffer.length}`));
                 } else {
                   resolveDownload(audioBuffer);
                 }
@@ -292,14 +257,14 @@ export async function GET(request: Request) {
             const mimeType = getAudioMimeType(decodedFilename);
             const downloadFilename = decodedFilename.split('/').pop() || decodedFilename;
             
-            console.log(`✅ Serving ${fileData.length} bytes as ${mimeType}`);
+            const totalTime = Date.now() - requestStart;
+            console.log(`✅ Serving ${fileData.length} bytes as ${mimeType} (Total time: ${totalTime}ms)`);
 
             if (!resolved) {
               resolved = true;
-              clearTimeout(overallTimeout);
               cleanup();
               
-              // FIXED: Convert Buffer to Uint8Array for NextResponse compatibility
+              // Convert Buffer to Uint8Array for NextResponse compatibility
               const uint8Array = new Uint8Array(fileData);
               
               resolve(
@@ -311,6 +276,7 @@ export async function GET(request: Request) {
                     "Content-Disposition": `attachment; filename="${downloadFilename}"`,
                     "Cache-Control": "public, max-age=3600",
                     "Accept-Ranges": "bytes",
+                    "X-Total-Time": `${totalTime}ms`,
                   },
                 })
               );
@@ -321,7 +287,7 @@ export async function GET(request: Request) {
             console.log(`❌ Error with path ${pathIndex + 1}: ${error instanceof Error ? error.message : 'Unknown'}`);
             pathIndex++;
             
-            // Add small delay to prevent rapid retries
+            // Small delay to prevent rapid retries
             setTimeout(tryNextPath, 200);
           }
         };
@@ -334,8 +300,6 @@ export async function GET(request: Request) {
     // Handle connection errors
     conn.on("error", (err) => {
       console.error("❌ SFTP connection error:", err.message);
-      clearTimeout(connectionTimeout);
-      clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
         cleanup();
@@ -350,24 +314,21 @@ export async function GET(request: Request) {
       console.log("🔌 SFTP connection closed");
     });
 
-    // Connect with stable settings - NO COMPRESSION to avoid Zlib errors
+    // Connect with stable settings - NO COMPRESSION, NO TIMEOUTS
     try {
-      console.log("🔌 Connecting to SFTP with stable settings...");
+      console.log("🔌 Connecting to SFTP with NO TIMEOUTS...");
       conn.connect({
         ...sftpConfig,
-        readyTimeout: 25000,
-        keepaliveInterval: 30000, // Longer keepalive interval
-        keepaliveCountMax: 2,
+        // NO readyTimeout 
+        keepaliveInterval: 30000,
+        keepaliveCountMax: 10, // More generous
         algorithms: {
-          compress: ['none'], // DISABLE COMPRESSION - this prevents Zlib errors
+          compress: ['none'], // Still no compression to avoid Zlib errors
         },
-        // Additional stability settings
         tryKeyboard: false,
       });
     } catch (e) {
       console.error("❌ Connection setup error:", e);
-      clearTimeout(connectionTimeout);
-      clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
         resolve(NextResponse.json({ 

@@ -1,6 +1,7 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable prefer-const */
-// app/api/sftp/download/route.ts - Fixed for call recordings
+// app/api/sftp/download/route.ts - Stable version focused on reliability
 
 import { Client } from "ssh2";
 import { NextResponse } from "next/server";
@@ -25,7 +26,7 @@ function getSftpConfig(): SftpConfig {
   };
 }
 
-function getAudioMimeType(buffer: Buffer, filename: string): string {
+function getAudioMimeType(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const extensionMimeTypes: Record<string, string> = {
     'wav': 'audio/wav',
@@ -34,18 +35,11 @@ function getAudioMimeType(buffer: Buffer, filename: string): string {
     'm4a': 'audio/mp4',
     'aac': 'audio/aac',
     'ogg': 'audio/ogg',
-    'wma': 'audio/x-ms-wma',
   };
-
-  if (extensionMimeTypes[ext]) {
-    return extensionMimeTypes[ext];
-  }
-
-  // Default to WAV for call recordings
-  return 'audio/wav';
+  return extensionMimeTypes[ext] || 'audio/wav';
 }
 
-// FIXED: More efficient path construction for call recordings
+// Simple but thorough path construction
 function constructSftpPath(filename: string): string[] {
   const possiblePaths = [];
   
@@ -57,7 +51,7 @@ function constructSftpPath(filename: string): string[] {
     console.log(`⚠️ Could not decode filename: ${filename}`);
   }
   
-  // If filename has path structure, prioritize it
+  // If filename has path structure, use it first
   if (decodedFilename.includes('/')) {
     let cleanPath = decodedFilename;
     
@@ -81,7 +75,7 @@ function constructSftpPath(filename: string): string[] {
   // Extract filename for date-based searches
   const justFilename = decodedFilename.split('/').pop() || decodedFilename;
   
-  // Try current date and previous 7 days (reasonable for call recordings)
+  // Try current date and previous 7 days
   const currentDate = new Date();
   for (let daysBack = 0; daysBack <= 7; daysBack++) {
     const targetDate = new Date(currentDate);
@@ -97,11 +91,11 @@ function constructSftpPath(filename: string): string[] {
     possiblePaths.push(`${datePath}/${justFilename}`);
   }
   
-  // Try direct access
+  // Try direct access as fallback
   possiblePaths.push(`./${justFilename}`);
   possiblePaths.push(justFilename);
   
-  // Remove duplicates
+  // Remove duplicates while preserving order
   return Array.from(new Set(possiblePaths));
 }
 
@@ -113,7 +107,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Filename is required" }, { status: 400 });
   }
 
-  console.log(`🎵 SFTP download for call recording: ${filename}`);
+  console.log(`🎵 STABLE SFTP download for: ${filename}`);
   
   const requestStart = Date.now();
 
@@ -128,30 +122,46 @@ export async function GET(request: Request) {
   return new Promise<NextResponse>((resolve) => {
     const conn = new Client();
     let resolved = false;
+    let sftpSession: any = null;
 
-    // FIXED: Realistic timeouts for call recordings
+    // Cleanup function
+    const cleanup = () => {
+      try {
+        if (sftpSession) {
+          sftpSession.end();
+          sftpSession = null;
+        }
+        conn.end();
+      } catch (e) {
+        console.log("Cleanup error:", e);
+      }
+    };
+
+    // Overall timeout - generous for call recordings
     const overallTimeout = setTimeout(() => {
       if (!resolved) {
-        console.error(`⏰ Overall request timeout after ${Date.now() - requestStart}ms`);
+        console.error(`⏰ Overall timeout after ${Date.now() - requestStart}ms`);
         resolved = true;
-        conn.end();
+        cleanup();
         resolve(NextResponse.json({ 
-          error: "Download timeout - call recording may be large or server is slow" 
+          error: "Download timeout - please try again" 
         }, { status: 504 }));
       }
-    }, 180000); // 3 minutes total for call recordings
+    }, 180000); // 3 minutes total
 
+    // Connection timeout
     const connectionTimeout = setTimeout(() => {
       if (!resolved) {
         console.error("⏰ SFTP connection timeout");
         resolved = true;
-        conn.end();
+        cleanup();
         resolve(NextResponse.json({ 
           error: "SFTP connection timeout" 
         }, { status: 504 }));
       }
-    }, 20000); // 20 seconds for connection
+    }, 25000); // 25 seconds for connection
 
+    // Handle connection ready
     conn.on("ready", () => {
       console.log("✅ SFTP connection ready");
       clearTimeout(connectionTimeout);
@@ -162,208 +172,173 @@ export async function GET(request: Request) {
           if (!resolved) {
             resolved = true;
             clearTimeout(overallTimeout);
+            cleanup();
             resolve(NextResponse.json({ error: "SFTP session error" }, { status: 500 }));
           }
           return;
         }
 
+        sftpSession = sftp;
         const possiblePaths = constructSftpPath(filename);
-        console.log(`🔍 Searching ${possiblePaths.length} paths for call recording`);
+        console.log(`🔍 Searching ${possiblePaths.length} paths`);
         
         let pathIndex = 0;
         
-        const tryNextPath = () => {
+        const tryNextPath = async () => {
+          if (resolved) return; // Safety check
+          
           if (pathIndex >= possiblePaths.length) {
-            console.error(`❌ Call recording not found in ${possiblePaths.length} paths`);
+            console.error(`❌ File not found in ${possiblePaths.length} paths`);
             if (!resolved) {
               resolved = true;
               clearTimeout(overallTimeout);
+              cleanup();
               resolve(NextResponse.json({ 
-                error: "Audio file not found",
-                searchedPaths: possiblePaths.length
+                error: "Audio file not found"
               }, { status: 404 }));
             }
-            conn.end();
             return;
           }
           
           const currentPath = possiblePaths[pathIndex];
           console.log(`🔍 Trying path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
           
-          // FIXED: Longer stat timeout for call recordings
-          const statTimeout = setTimeout(() => {
-            console.log(`⏰ Stat timeout for: ${currentPath}`);
-            pathIndex++;
-            tryNextPath();
-          }, 10000); // 10 seconds for stat
-          
-          sftp.stat(currentPath, (statErr, stats) => {
-            clearTimeout(statTimeout);
-            
-            if (statErr) {
-              console.log(`❌ Path ${pathIndex + 1} not found`);
-              pathIndex++;
-              tryNextPath();
-              return;
-            }
+          try {
+            // Use promises to avoid callback hell and improve error handling
+            const stats = await new Promise<any>((resolveStats, rejectStats) => {
+              const statTimeout = setTimeout(() => {
+                rejectStats(new Error("Stat timeout"));
+              }, 15000); // 15 seconds for stat operation
+              
+              sftp.stat(currentPath, (statErr, statsResult) => {
+                clearTimeout(statTimeout);
+                if (statErr) {
+                  rejectStats(statErr);
+                } else {
+                  resolveStats(statsResult);
+                }
+              });
+            });
 
             const sizeInMB = stats.size / (1024 * 1024);
-            console.log(`📊 Call recording found: ${sizeInMB.toFixed(2)}MB`);
+            console.log(`📊 Found file: ${sizeInMB.toFixed(2)}MB`);
             
-            // Basic validation for call recordings
+            // Basic validation
             if (stats.size === 0) {
               console.log(`⚠️ Empty file, trying next`);
               pathIndex++;
-              tryNextPath();
-              return;
+              return tryNextPath();
             }
 
-            if (stats.size < 10000) { // Less than 10KB is suspicious for call recordings
-              console.log(`⚠️ File too small for call recording: ${stats.size} bytes`);
+            if (stats.size < 10000) {
+              console.log(`⚠️ File too small: ${stats.size} bytes`);
               pathIndex++;
-              tryNextPath();
-              return;
+              return tryNextPath();
             }
 
-            // Log size info for call recordings
-            if (sizeInMB > 50) {
-              console.log(`📢 Large call recording: ${sizeInMB.toFixed(2)}MB - may take longer to download`);
-            }
-
-            // FIXED: Stream call recording with realistic settings
-            console.log(`📥 Streaming ${stats.size} bytes from: ${currentPath}`);
+            // Download the file
+            console.log(`📥 Downloading ${stats.size} bytes from: ${currentPath}`);
             
-            const fileBuffers: Buffer[] = [];
-            let totalBytesReceived = 0;
-            const downloadStartTime = Date.now();
-            
-            const readStream = sftp.createReadStream(currentPath, {
-              // FIXED: Optimized for call recordings - larger chunks for efficiency
-              highWaterMark: 256 * 1024, // 256KB chunks for call recordings
-            });
-
-            // FIXED: Realistic download timeout based on file size
-            const baseTimeout = 60000; // 1 minute base
-            const timeoutPerMB = 30000; // 30 seconds per MB
-            const downloadTimeout = Math.min(
-              baseTimeout + (sizeInMB * timeoutPerMB),
-              120000 // 2 minute max
-            );
-            
-            console.log(`⏰ Download timeout set to ${downloadTimeout / 1000} seconds for ${sizeInMB.toFixed(2)}MB file`);
-            
-            const downloadTimeoutId = setTimeout(() => {
-              console.error(`⏰ Download timeout for call recording after ${downloadTimeout}ms`);
-              readStream.destroy();
-              if (!resolved) {
-                resolved = true;
-                clearTimeout(overallTimeout);
-                resolve(NextResponse.json({ 
-                  error: "Call recording download timeout - file may be too large" 
-                }, { status: 504 }));
-              }
-              conn.end();
-            }, downloadTimeout);
-
-            readStream.on("error", (readErr: Error) => {
-              console.log(`❌ Read error: ${readErr.message}`);
-              clearTimeout(downloadTimeoutId);
+            const fileData = await new Promise<Buffer>((resolveDownload, rejectDownload) => {
+              const fileBuffers: Buffer[] = [];
+              let totalBytesReceived = 0;
+              const downloadStartTime = Date.now();
               
-              // For call recordings, try next path on connection errors
-              if (readErr.message.includes('No response') || 
-                  readErr.message.includes('Connection lost')) {
-                console.log(`🔄 Connection error, trying next path`);
-                pathIndex++;
-                tryNextPath();
-              } else {
-                if (!resolved) {
-                  resolved = true;
-                  clearTimeout(overallTimeout);
-                  resolve(NextResponse.json({ 
-                    error: `Read error: ${readErr.message}` 
-                  }, { status: 500 }));
+              // Create download timeout based on file size
+              const downloadTimeout = Math.min(60000 + (sizeInMB * 20000), 120000); // 1min + 20s per MB, max 2min
+              
+              const downloadTimeoutId = setTimeout(() => {
+                rejectDownload(new Error("Download timeout"));
+              }, downloadTimeout);
+              
+              const readStream = sftp.createReadStream(currentPath, {
+                highWaterMark: 256 * 1024, // 256KB chunks
+              });
+
+              readStream.on("error", (readErr: Error) => {
+                clearTimeout(downloadTimeoutId);
+                rejectDownload(readErr);
+              });
+
+              readStream.on("data", (chunk: Buffer) => {
+                fileBuffers.push(chunk);
+                totalBytesReceived += chunk.length;
+                
+                // Progress logging
+                if (totalBytesReceived % (1024 * 1024) < chunk.length) { // Every 1MB
+                  const progress = ((totalBytesReceived / stats.size) * 100).toFixed(0);
+                  console.log(`📦 Progress: ${progress}%`);
                 }
-                conn.end();
-              }
+              });
+
+              readStream.on("end", () => {
+                clearTimeout(downloadTimeoutId);
+                const audioBuffer = Buffer.concat(fileBuffers);
+                const downloadTime = Date.now() - downloadStartTime;
+                
+                console.log(`✅ Downloaded: ${audioBuffer.length} bytes in ${downloadTime}ms`);
+                
+                // Verify size
+                if (audioBuffer.length !== stats.size) {
+                  rejectDownload(new Error("Size mismatch"));
+                } else {
+                  resolveDownload(audioBuffer);
+                }
+              });
             });
 
-            readStream.on("data", (chunk: Buffer) => {
-              fileBuffers.push(chunk);
-              totalBytesReceived += chunk.length;
-              
-              // Progress logging for call recordings
-              const progress = ((totalBytesReceived / stats.size) * 100).toFixed(0);
-              if (totalBytesReceived % (1024 * 1024) < chunk.length) { // Every 1MB
-                console.log(`📦 Progress: ${progress}% (${(totalBytesReceived / (1024 * 1024)).toFixed(1)}MB/${sizeInMB.toFixed(1)}MB)`);
-              }
-            });
+            // Success! Return the file
+            const decodedFilename = decodeURIComponent(filename);
+            const mimeType = getAudioMimeType(decodedFilename);
+            const downloadFilename = decodedFilename.split('/').pop() || decodedFilename;
+            
+            console.log(`✅ Serving ${fileData.length} bytes as ${mimeType}`);
 
-            readStream.on("end", () => {
-              clearTimeout(downloadTimeoutId);
+            if (!resolved) {
+              resolved = true;
               clearTimeout(overallTimeout);
+              cleanup();
               
-              const audioBuffer = Buffer.concat(fileBuffers);
-              const downloadTime = Date.now() - downloadStartTime;
-              const totalTime = Date.now() - requestStart;
+              // FIXED: Convert Buffer to Uint8Array for NextResponse compatibility
+              const uint8Array = new Uint8Array(fileData);
               
-              console.log(`✅ Call recording downloaded: ${audioBuffer.length} bytes in ${downloadTime}ms`);
-              
-              // Verify size
-              if (audioBuffer.length !== stats.size) {
-                console.error(`❌ Size mismatch! Expected: ${stats.size}, Got: ${audioBuffer.length}`);
-                if (!resolved) {
-                  resolved = true;
-                  resolve(NextResponse.json({ 
-                    error: "Download size mismatch" 
-                  }, { status: 500 }));
-                }
-                conn.end();
-                return;
-              }
+              resolve(
+                new NextResponse(uint8Array, {
+                  status: 200,
+                  headers: {
+                    "Content-Type": mimeType,
+                    "Content-Length": fileData.length.toString(),
+                    "Content-Disposition": `attachment; filename="${downloadFilename}"`,
+                    "Cache-Control": "public, max-age=3600",
+                    "Accept-Ranges": "bytes",
+                  },
+                })
+              );
+            }
+            return;
 
-              // Get MIME type
-              const decodedFilename = decodeURIComponent(filename);
-              const mimeType = getAudioMimeType(audioBuffer, decodedFilename);
-              const downloadFilename = decodedFilename.split('/').pop() || decodedFilename;
-              
-              console.log(`✅ Serving ${audioBuffer.length} bytes as ${mimeType}`);
-
-              if (!resolved) {
-                resolved = true;
-                resolve(
-                  new NextResponse(audioBuffer, {
-                    status: 200,
-                    headers: {
-                      "Content-Type": mimeType,
-                      "Content-Length": audioBuffer.length.toString(),
-                      "Content-Disposition": `attachment; filename="${downloadFilename}"`,
-                      "Cache-Control": "public, max-age=3600", // 1 hour cache for call recordings
-                      "Accept-Ranges": "bytes",
-                      "X-File-Size": audioBuffer.length.toString(),
-                      "X-Download-Time": `${downloadTime}ms`,
-                      "X-Total-Time": `${totalTime}ms`,
-                      "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Disposition",
-                    },
-                  })
-                );
-              }
-              
-              conn.end();
-            });
-          });
+          } catch (error) {
+            console.log(`❌ Error with path ${pathIndex + 1}: ${error instanceof Error ? error.message : 'Unknown'}`);
+            pathIndex++;
+            
+            // Add small delay to prevent rapid retries
+            setTimeout(tryNextPath, 200);
+          }
         };
         
+        // Start trying paths
         tryNextPath();
       });
     });
 
-    // FIXED: Better connection error handling
+    // Handle connection errors
     conn.on("error", (err) => {
       console.error("❌ SFTP connection error:", err.message);
       clearTimeout(connectionTimeout);
       clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
+        cleanup();
         resolve(NextResponse.json({ 
           error: "SFTP connection failed",
           details: err.message 
@@ -375,26 +350,28 @@ export async function GET(request: Request) {
       console.log("🔌 SFTP connection closed");
     });
 
-    // FIXED: Connection with better settings for call recordings
+    // Connect with stable settings - NO COMPRESSION to avoid Zlib errors
     try {
-      console.log("🔌 Connecting to SFTP...");
+      console.log("🔌 Connecting to SFTP with stable settings...");
       conn.connect({
         ...sftpConfig,
-        readyTimeout: 20000, // 20 seconds
-        keepaliveInterval: 10000, // 10 second keepalive
-        keepaliveCountMax: 3, // Allow 3 failed keepalive
+        readyTimeout: 25000,
+        keepaliveInterval: 30000, // Longer keepalive interval
+        keepaliveCountMax: 2,
         algorithms: {
-          compress: ['zlib@openssh.com', 'zlib', 'none'], // Enable compression for call recordings
-        }
+          compress: ['none'], // DISABLE COMPRESSION - this prevents Zlib errors
+        },
+        // Additional stability settings
+        tryKeyboard: false,
       });
     } catch (e) {
-      console.error("❌ Connection error:", e);
+      console.error("❌ Connection setup error:", e);
       clearTimeout(connectionTimeout);
       clearTimeout(overallTimeout);
       if (!resolved) {
         resolved = true;
         resolve(NextResponse.json({ 
-          error: "Failed to connect to SFTP" 
+          error: "Failed to initialize SFTP connection" 
         }, { status: 500 }));
       }
     }

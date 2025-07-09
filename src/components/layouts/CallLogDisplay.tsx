@@ -741,7 +741,7 @@ const CallLogDisplay = ({
                 </div>
               ) : (
                 <div className="overflow-hidden border border-border rounded-lg">
-                  <div className="overflow-x-auto max-h-[calc(100vh-320px)]">
+                  <div className="overflow-x-auto max-h-[calc(100vh-420px)]">
                     <table className="min-w-full bg-bg-primary">
                       <thead className="bg-bg-secondary border-b border-border sticky top-0 z-10">
                         <tr>

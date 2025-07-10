@@ -149,7 +149,7 @@ async function checkCallExistsInSupabase(contactId: string): Promise<boolean> {
   }
 }
 
-// Helper function to check Supabase status for call logs
+// Helper function to check Supabase status for call logs (with batching to avoid 414 error)
 async function enhanceCallLogsWithSupabaseStatus(
   logs: CallLog[]
 ): Promise<CallLog[]> {
@@ -157,24 +157,47 @@ async function enhanceCallLogsWithSupabaseStatus(
     if (logs.length === 0) return logs;
 
     const contactIds = logs.map((log) => log.contact_id);
+    console.log(`🔍 Checking ${contactIds.length} contact IDs against Supabase in batches...`);
 
-    const { data: existingRecords, error } = await supabase
-      .from("call_records")
-      .select("contact_id")
-      .in("contact_id", contactIds);
+    // CRITICAL FIX: Batch the Supabase queries to avoid 414 Request-URI Too Large error
+    const SUPABASE_BATCH_SIZE = 100; // Process 100 contact IDs at a time
+    const allExistingContactIds = new Set<string>();
 
-    if (error) {
-      console.error("Error checking Supabase status:", error);
-      return logs.map((log) => ({ ...log, existsInSupabase: false }));
+    for (let i = 0; i < contactIds.length; i += SUPABASE_BATCH_SIZE) {
+      const batch = contactIds.slice(i, i + SUPABASE_BATCH_SIZE);
+      const batchNumber = Math.floor(i / SUPABASE_BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(contactIds.length / SUPABASE_BATCH_SIZE);
+      
+      console.log(`📊 Checking Supabase batch ${batchNumber}/${totalBatches} (${batch.length} contact IDs)`);
+
+      try {
+        const { data: batchRecords, error } = await supabase
+          .from("call_records")
+          .select("contact_id")
+          .in("contact_id", batch);
+
+        if (error) {
+          console.error(`Error in Supabase batch ${batchNumber}:`, error);
+          continue; // Continue with next batch even if one fails
+        }
+
+        // Add this batch's results to the overall set
+        if (batchRecords) {
+          batchRecords.forEach(record => allExistingContactIds.add(record.contact_id));
+        }
+
+        console.log(`✅ Batch ${batchNumber}/${totalBatches}: Found ${batchRecords?.length || 0} existing records`);
+      } catch (batchError) {
+        console.error(`Error processing Supabase batch ${batchNumber}:`, batchError);
+        continue; // Continue with next batch
+      }
     }
 
-    const existingContactIds = new Set(
-      existingRecords?.map((record) => record.contact_id) || []
-    );
+    console.log(`📋 Total existing records found: ${allExistingContactIds.size}/${contactIds.length}`);
 
     return logs.map((log) => ({
       ...log,
-      existsInSupabase: existingContactIds.has(log.contact_id),
+      existsInSupabase: allExistingContactIds.has(log.contact_id),
     }));
   } catch (error) {
     console.error("Error enhancing call logs with Supabase status:", error);

@@ -496,7 +496,7 @@ async function transcribeAudio(
       body: JSON.stringify({
         audio_url: uploadUrl,
         speech_model: "best",
-        word_: [
+        word_boost: [
           "Team",
           "Global",
           "Express",

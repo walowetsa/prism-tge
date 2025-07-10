@@ -59,7 +59,6 @@ interface AutoProcessingState {
   currentBatch: number;
   processed: number;
   failed: number;
-  skipped: number;
   remaining: number;
   totalAttempts: number;
   lastBatchSuccess: boolean;
@@ -112,7 +111,6 @@ const CallLogDisplay = ({
     currentBatch: 0,
     processed: 0,
     failed: 0,
-    skipped: 0,
     remaining: 0,
     totalAttempts: 0,
     lastBatchSuccess: true,
@@ -375,10 +373,10 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process a single batch with timeout protection and duplicate prevention
-  const processSingleBatch = async (): Promise<{ success: boolean; processed: number; hasMore: boolean; errors: ProcessingError[]; skipped?: number }> => {
+  // Process a single batch with timeout protection
+  const processSingleBatch = async (): Promise<{ success: boolean; processed: number; hasMore: boolean; errors: ProcessingError[] }> => {
     if (!selectedDateRange) {
-      return { success: false, processed: 0, hasMore: false, errors: [], skipped: 0 };
+      return { success: false, processed: 0, hasMore: false, errors: [] };
     }
 
     try {
@@ -421,11 +419,6 @@ const CallLogDisplay = ({
         const errors = data.errors || [];
 
         console.log(`✅ Batch completed: ${processed} processed, hasMore: ${hasMore}`);
-        
-        // Enhanced logging for duplicate detection
-        if (processed === 0 && hasMore) {
-          console.log(`ℹ️ No calls processed but more exist - likely all were duplicates or already processed`);
-        }
 
         // Refresh Supabase data if we processed anything
         if (processed > 0) {
@@ -437,7 +430,6 @@ const CallLogDisplay = ({
           processed,
           hasMore,
           errors,
-          skipped: BATCH_SIZE - processed - errors.length, // Estimate skipped calls
         };
       } else {
         throw new Error(data.error || 'Unknown API error');
@@ -445,7 +437,7 @@ const CallLogDisplay = ({
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         console.error('❌ Batch aborted due to timeout');
-        return { success: false, processed: 0, hasMore: true, errors: [{ contact_id: 'timeout', error: 'Request timeout' }], skipped: 0 };
+        return { success: false, processed: 0, hasMore: true, errors: [{ contact_id: 'timeout', error: 'Request timeout' }] };
       }
       
       console.error('❌ Batch processing error:', error);
@@ -453,8 +445,7 @@ const CallLogDisplay = ({
         success: false, 
         processed: 0, 
         hasMore: true, 
-        errors: [{ contact_id: 'error', error: error instanceof Error ? error.message : 'Unknown error' }],
-        skipped: 0
+        errors: [{ contact_id: 'error', error: error instanceof Error ? error.message : 'Unknown error' }] 
       };
     }
   };
@@ -598,7 +589,6 @@ const CallLogDisplay = ({
         currentBatch: 0,
         processed: 0,
         failed: 0,
-        skipped: 0,
         remaining: 0,
         totalAttempts: 0,
         lastBatchSuccess: true,
@@ -698,7 +688,7 @@ const CallLogDisplay = ({
           {/* Real-time Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              🔄 Duplicate-protected processing • Double-checks before processing • {BATCH_SIZE} calls per batch • {BATCH_PROCESSING_DELAY/1000}s delays
+              🔄 Timeout-protected processing • {BATCH_SIZE} calls per batch • {BATCH_PROCESSING_DELAY/1000}s delays
               {autoProcessing.isRunning && (
                 <span className="ml-2 text-yellow-300">⏸️ Real-time updates paused during processing</span>
               )}
@@ -710,7 +700,7 @@ const CallLogDisplay = ({
             <div className="mb-4 p-4 bg-blue-900 border border-blue-600 rounded-lg">
               <div className="flex justify-between items-center mb-2">
                 <div className="text-sm text-blue-300 font-medium">
-                  🤖 Auto-Processing Active (Duplicate-Protected)
+                  🤖 Auto-Processing Active (Timeout-Protected)
                 </div>
                 <button
                   onClick={stopAutoProcessing}
@@ -722,12 +712,9 @@ const CallLogDisplay = ({
               <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-xs text-blue-200 mb-2">
                 <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}</span></div>
                 <div>Processed: <span className="text-green-400 font-medium">{autoProcessing.processed}</span></div>
-                <div>Skipped: <span className="text-yellow-400 font-medium">{autoProcessing.skipped}</span></div>
                 <div>Failed: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
                 <div>Attempts: <span className="text-purple-400 font-medium">{autoProcessing.totalAttempts}/{MAX_TOTAL_ATTEMPTS}</span></div>
                 <div>C.Failures: <span className="text-orange-400 font-medium">{autoProcessing.consecutiveFailures}/{MAX_CONSECUTIVE_FAILURES}</span></div>
-              </div>
-              <div className="grid grid-cols-1 gap-2 text-xs text-blue-200 mb-2">
                 <div>Status: <span className={autoProcessing.lastBatchSuccess ? "text-green-400" : "text-red-400"}>{autoProcessing.lastBatchSuccess ? "✅ Success" : "❌ Failed"}</span></div>
               </div>
               <div className="mt-2">
@@ -740,7 +727,7 @@ const CallLogDisplay = ({
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Duplicate-protected • Double-checks before processing • {REQUEST_TIMEOUT/1000}s max per batch • Auto-retry with backoff
+                  Protected against 504 timeouts • {REQUEST_TIMEOUT/1000}s max per batch • Auto-retry with backoff
                 </div>
               </div>
             </div>
@@ -766,10 +753,7 @@ const CallLogDisplay = ({
               <div>Transcribed: <span className="text-green-400 font-medium">{calculatedSummary.existingTranscriptions}</span></div>
               <div>Missing: <span className="text-yellow-400 font-medium">{calculatedSummary.missingTranscriptions}</span></div>
               <div>Processed: <span className="text-blue-400 font-medium">{autoProcessing.processed}</span></div>
-              <div>Skipped: <span className="text-yellow-400 font-medium">{autoProcessing.skipped}</span></div>
               <div>Errors: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
-            </div>
-            <div className="grid grid-cols-1 gap-2 text-xs text-gray-300 mt-2">
               <div>Progress: <span className="text-purple-400 font-medium">
                 {calculatedSummary.totalCalls > 0 
                   ? `${Math.round((calculatedSummary.existingTranscriptions / calculatedSummary.totalCalls) * 100)}%`
@@ -777,12 +761,6 @@ const CallLogDisplay = ({
                 }
               </span></div>
             </div>
-            
-            {autoProcessing.skipped > 0 && (
-              <div className="mt-2 text-xs text-yellow-300">
-                💡 Skipped calls were already processed (duplicate prevention active)
-              </div>
-            )}
           </div>
 
           {/* Processing Errors */}

@@ -749,8 +749,12 @@ async function saveTranscriptionToSupabase(
   }
 }
 
-// Main API handler
+// Main API handler with timeout protection
 export async function GET(request: NextRequest) {
+  // Set a reasonable timeout for the entire operation
+  const startTime = Date.now();
+  const MAX_EXECUTION_TIME = 110000; // 110 seconds (under most platform limits)
+  
   try {
     const { searchParams } = new URL(request.url);
     const startDate = searchParams.get("startDate");
@@ -761,7 +765,7 @@ export async function GET(request: NextRequest) {
       searchParams.get("maxProcessCount") || "3"
     );
 
-    console.log("🚀 Starting unified call processing workflow");
+    console.log("🚀 Starting unified call processing workflow with timeout protection");
 
     let dateRange: DateRange | undefined;
 
@@ -786,14 +790,25 @@ export async function GET(request: NextRequest) {
       dateRange = { start, end };
     }
 
+    // Helper function to check if we're approaching timeout
+    const checkTimeout = () => {
+      const elapsed = Date.now() - startTime;
+      if (elapsed > MAX_EXECUTION_TIME) {
+        throw new Error(`Operation timeout after ${elapsed}ms`);
+      }
+      return elapsed;
+    };
+
     // Step 1: Get call logs from database
     console.log("📊 Step 1: Fetching call logs from database...");
     let logs = await getContactLogs(dateRange);
     console.log(`Found ${logs.length} call logs`);
+    checkTimeout();
 
     // Step 2: Check Supabase status (always fresh query)
     console.log("🔍 Step 2: Checking Supabase for existing transcriptions...");
     logs = await enhanceCallLogsWithSupabaseStatus(logs);
+    checkTimeout();
 
     const missingTranscriptions = logs.filter(
       (log) => !log.existsInSupabase && log.recording_location
@@ -806,10 +821,10 @@ export async function GET(request: NextRequest) {
     let processedCount = 0;
     const errors: any[] = [];
 
-    // Step 3: Process missing transcriptions (if requested)
+    // Step 3: Process missing transcriptions (if requested) with strict limits
     if (processTranscriptions && missingTranscriptions.length > 0) {
       console.log(
-        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions...`
+        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions with timeout protection...`
       );
 
       const apiKey = process.env.ASSEMBLYAI_API_KEY;
@@ -824,23 +839,28 @@ export async function GET(request: NextRequest) {
 
       for (const log of logsToProcess) {
         try {
-          console.log(`\n🎯 Processing call ${log.contact_id}...`);
+          // Check timeout before each call
+          const elapsed = checkTimeout();
+          console.log(`\n🎯 Processing call ${log.contact_id} (${elapsed}ms elapsed)...`);
 
           // Download audio from SFTP
           console.log("📥 Downloading audio from SFTP...");
           const audioBuffer = await downloadAudioFromSftp(
             log.recording_location
           );
+          checkTimeout();
 
           // Upload to AssemblyAI
           console.log("⬆️ Uploading to AssemblyAI...");
           const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
+          checkTimeout();
 
           // Transcribe audio
           console.log("🎙️ Transcribing audio...");
           const transcript = await transcribeAudio(uploadUrl, 2);
+          checkTimeout();
 
-          // Perform topic categorization
+          // Perform topic categorization (with timeout protection)
           console.log("🏷️ Performing topic categorization...");
           let categorization: {
             primary_category: string;
@@ -850,7 +870,13 @@ export async function GET(request: NextRequest) {
 
           if (transcript.utterances && transcript.utterances.length > 0) {
             try {
-              categorization = await performTopicCategorization(transcript);
+              // Skip categorization if we're running out of time
+              const timeRemaining = MAX_EXECUTION_TIME - (Date.now() - startTime);
+              if (timeRemaining > 30000) { // Only categorize if we have 30+ seconds left
+                categorization = await performTopicCategorization(transcript);
+              } else {
+                console.log("⏰ Skipping categorization due to time constraints");
+              }
             } catch (catError) {
               console.error("⚠️ Categorization failed:", catError);
             }
@@ -871,6 +897,7 @@ export async function GET(request: NextRequest) {
           // Save to Supabase
           console.log("💾 Saving to Supabase...");
           await saveTranscriptionToSupabase(log, transcript, categorization);
+          checkTimeout();
 
           // Update log status
           log.existsInSupabase = true;
@@ -883,14 +910,25 @@ export async function GET(request: NextRequest) {
             contact_id: log.contact_id,
             error: error instanceof Error ? error.message : "Unknown error",
           });
+          
+          // If it's a timeout error, break the loop
+          if (error instanceof Error && error.message.includes('timeout')) {
+            console.log("⏰ Breaking processing loop due to timeout");
+            break;
+          }
         }
       }
     }
 
-    // Step 4: Fresh check after processing to get accurate counts
-    if (processedCount > 0) {
-      console.log("🔄 Step 4: Re-checking Supabase status after processing...");
-      logs = await enhanceCallLogsWithSupabaseStatus(logs);
+    // Step 4: Fresh check after processing to get accurate counts (if time permits)
+    try {
+      if (processedCount > 0) {
+        checkTimeout();
+        console.log("🔄 Step 4: Re-checking Supabase status after processing...");
+        logs = await enhanceCallLogsWithSupabaseStatus(logs);
+      }
+    } catch (timeoutError) {
+      console.log("⏰ Skipping final Supabase check due to timeout");
     }
 
     // Calculate final summary with fresh data
@@ -905,6 +943,7 @@ export async function GET(request: NextRequest) {
       processedThisRequest: processedCount,
       errors: errors.length,
       hasMoreToProcess: finalMissingTranscriptions.length > 0,
+      executionTime: Date.now() - startTime,
     };
 
     console.log("🎉 Unified workflow completed:", summary);
@@ -924,16 +963,23 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("💥 Unified workflow error:", error);
+    
+    // Check if it's a timeout error
+    const isTimeoutError = error instanceof Error && 
+      (error.message.includes('timeout') || error.message.includes('504'));
+    
     return NextResponse.json(
       {
         success: false,
-        error: "Failed to process calls",
+        error: isTimeoutError ? "Request timeout - processing takes too long" : "Failed to process calls",
+        errorType: isTimeoutError ? "timeout" : "general",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.message
             : undefined,
+        executionTime: Date.now() - startTime,
       },
-      { status: 500 }
+      { status: isTimeoutError ? 408 : 500 }
     );
   }
 }

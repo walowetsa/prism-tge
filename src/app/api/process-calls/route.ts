@@ -753,7 +753,7 @@ export async function GET(request: NextRequest) {
     const processTranscriptions =
       searchParams.get("processTranscriptions") === "true";
     const maxProcessCount = parseInt(
-      searchParams.get("maxProcessCount") || "5"
+      searchParams.get("maxProcessCount") || "3"
     );
 
     console.log("🚀 Starting unified call processing workflow");

@@ -128,6 +128,29 @@ async function getContactLogs(dateRange?: DateRange) {
   }
 }
 
+// Enhanced helper function to check if a single call exists in Supabase
+async function checkSingleCallExistsInSupabase(contactId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from("call_records")
+      .select("contact_id")
+      .eq("contact_id", contactId)
+      .single();
+
+    if (error && error.code !== "PGRST116") { // PGRST116 = no rows returned
+      console.error(`Error checking single call ${contactId}:`, error);
+      return false; // Assume doesn't exist if we can't check
+    }
+
+    const exists = !!data;
+    console.log(`🔍 Single call check: ${contactId} ${exists ? 'EXISTS' : 'MISSING'} in Supabase`);
+    return exists;
+  } catch (error) {
+    console.error(`Error in single call check for ${contactId}:`, error);
+    return false; // Assume doesn't exist if we can't check
+  }
+}
+
 // Enhanced helper function to check Supabase status with fresh data
 async function enhanceCallLogsWithSupabaseStatus(
   logs: CallLog[]
@@ -158,6 +181,13 @@ async function enhanceCallLogsWithSupabaseStatus(
     }));
 
     console.log(`📊 Supabase status check: ${existingContactIds.size} existing transcriptions out of ${logs.length} total calls`);
+    
+    // Log details about missing calls for debugging
+    const missingCalls = enhancedLogs.filter(log => !log.existsInSupabase && log.recording_location);
+    console.log(`🎯 Missing transcriptions identified: ${missingCalls.length} calls`);
+    if (missingCalls.length > 0 && missingCalls.length <= 10) {
+      console.log(`📋 Missing call IDs: ${missingCalls.map(log => log.contact_id).join(', ')}`);
+    }
     
     return enhancedLogs;
   } catch (error) {
@@ -843,6 +873,19 @@ export async function GET(request: NextRequest) {
           const elapsed = checkTimeout();
           console.log(`\n🎯 Processing call ${log.contact_id} (${elapsed}ms elapsed)...`);
 
+          // CRITICAL: Double-check if this call already exists in Supabase
+          // This prevents processing calls that might have been processed by another batch
+          console.log(`🔍 Double-checking if ${log.contact_id} already exists in Supabase...`);
+          const alreadyExists = await checkSingleCallExistsInSupabase(log.contact_id);
+          
+          if (alreadyExists) {
+            console.log(`⏭️ SKIPPING ${log.contact_id} - already exists in Supabase`);
+            log.existsInSupabase = true; // Update the log status
+            continue; // Skip to next call
+          }
+          
+          console.log(`✅ ${log.contact_id} confirmed missing - proceeding with transcription`);
+
           // Download audio from SFTP
           console.log("📥 Downloading audio from SFTP...");
           const audioBuffer = await downloadAudioFromSftp(
@@ -894,16 +937,25 @@ export async function GET(request: NextRequest) {
                 };
           }
 
-          // Save to Supabase
-          console.log("💾 Saving to Supabase...");
-          await saveTranscriptionToSupabase(log, transcript, categorization);
-          checkTimeout();
+          // Final check before saving (in case of race conditions)
+          console.log(`🔍 Final check before saving ${log.contact_id}...`);
+          const stillMissing = !(await checkSingleCallExistsInSupabase(log.contact_id));
+          
+          if (!stillMissing) {
+            console.log(`⚠️ Race condition detected: ${log.contact_id} was created during processing - skipping save`);
+            log.existsInSupabase = true;
+          } else {
+            // Save to Supabase
+            console.log("💾 Saving to Supabase...");
+            await saveTranscriptionToSupabase(log, transcript, categorization);
+            checkTimeout();
 
-          // Update log status
-          log.existsInSupabase = true;
-          processedCount++;
+            // Update log status
+            log.existsInSupabase = true;
+            processedCount++;
 
-          console.log(`✅ Successfully processed call ${log.contact_id}`);
+            console.log(`✅ Successfully processed and saved call ${log.contact_id}`);
+          }
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           errors.push({

@@ -74,7 +74,6 @@ interface FilterState {
   agent: string;
   queue: string;
   disposition: string;
-  category: string;
   campaign: string;
   dateRange: string;
   specificDate: string; // Added for specific date filtering
@@ -102,12 +101,12 @@ const SENTIMENT_COLORS = {
 
 // Sample queries to help guide users
 const SAMPLE_QUERIES = [
-  "How many calls were related to Tyre Sales?",
-  "Show me all EOFY sales calls and their performance",
-  "Can you give me a breakdown of call outcomes?",
-  "Can you compare Sales vs No Sales calls for me?",
-  "How has stock availability affected sales calls?",
-  "Give me a breakdown of No Sale calls",
+  "Give me a breakdown of all New Business Leads.",
+  "What are the most common reasons for declining offers?",
+  "What agents have the highest conversion rates?",
+  "Can you give me an end of summary summary?",
+  "Give me a breakdown of call sentiments.",
+  "Any suggestions for improving the number of leads generated?",
 ];
 
 // Custom Markdown Message Component with enhanced styling
@@ -243,7 +242,6 @@ export default function CallAnalyticsDashboard() {
     agent: "",
     queue: "",
     disposition: "",
-    category: "",
     campaign: "",
     dateRange: "all",
     specificDate: "",
@@ -297,6 +295,25 @@ export default function CallAnalyticsDashboard() {
 
     fetchAllCalls();
   }, []);
+
+  // Helper function to parse call duration from JSONB string
+  const parseCallDuration = (durationJson: string | object): { minutes: number; seconds: number } => {
+    try {
+      let duration;
+      if (typeof durationJson === 'string') {
+        duration = JSON.parse(durationJson);
+      } else {
+        duration = durationJson;
+      }
+      
+      return {
+        minutes: duration.minutes || 0,
+        seconds: duration.seconds || 0
+      };
+    } catch {
+      return { minutes: 0, seconds: 0 };
+    }
+  };
 
   // Helper function to count sentiments
   const countSentiments = (sentimentJson: string | null): SentimentCounts => {
@@ -352,16 +369,6 @@ export default function CallAnalyticsDashboard() {
     [calls]
   );
 
-  const uniqueCategories = useMemo(() => {
-    const categories = new Set<string>();
-    calls.forEach((call) => {
-      if (call.primary_category) {
-        categories.add(call.primary_category);
-      }
-    });
-    return [...categories].sort();
-  }, [calls]);
-
   const uniqueCampaigns = useMemo(
     () =>
       [...new Set(calls.map((call) => call.campaign_name))]
@@ -407,10 +414,6 @@ export default function CallAnalyticsDashboard() {
 
       // Disposition filter
       if (filters.disposition && call.disposition_title !== filters.disposition)
-        return false;
-
-      // Category filter
-      if (filters.category && call.primary_category !== filters.category)
         return false;
 
       // Campaign filter
@@ -540,29 +543,12 @@ const dispositionData = Object.entries(dispositionBreakdown)
     percentage: Math.round((count / filteredCalls.length) * 100),
   }));
 
-    // Category breakdown
-    const categoryBreakdown = filteredCalls.reduce((acc, call) => {
-  const category = call.primary_category || "Uncategorized";
-  acc[category] = (acc[category] || 0) + 1;
-  return acc;
-}, {} as Record<string, number>);
-
-const categoryData = Object.entries(categoryBreakdown)
-  .sort(([, a], [, b]) => b - a) // Sort by count descending
-  .slice(0, 10) // Limit to top 10 categories
-  .map(([category, count]) => ({
-    category:
-      category.length > 20 ? category.substring(0, 20) + "..." : category,
-    fullCategory: category,
-    count,
-    percentage: Math.round((count / filteredCalls.length) * 100),
-  }));
-
-    // AHT by hour - Fixed calculation
+    // AHT by hour - Fixed calculation with proper JSONB parsing
     const ahtByHour = filteredCalls.reduce((acc, call) => {
       const hour = new Date(call.initiation_timestamp).getHours();
-      // Convert call duration to total seconds for accurate calculation
-      const totalSeconds = (call.call_duration?.minutes || 0) * 60 + (call.call_duration?.seconds || 0);
+      // Parse call duration from JSONB format and convert to total seconds
+      const duration = parseCallDuration(call.call_duration);
+      const totalSeconds = duration.minutes * 60 + duration.seconds;
 
       if (!acc[hour]) {
         acc[hour] = { totalDuration: 0, callCount: 0 };
@@ -587,7 +573,6 @@ const categoryData = Object.entries(categoryBreakdown)
       dailyVolumeData,
       hourlyVolumeData,
       sentimentData,
-      categoryData,
       ahtData,
       totalSentiments,
       dispositionData,
@@ -598,11 +583,10 @@ const categoryData = Object.entries(categoryBreakdown)
 const stats = useMemo(() => {
   const totalCalls = filteredCalls.length;
   
-  // Calculate total duration in seconds for accurate AHT
+  // Calculate total duration in seconds for accurate AHT using JSONB parsing
   const totalDurationSeconds = filteredCalls.reduce((sum, call) => {
-    const minutes = call.call_duration?.minutes || 0;
-    const seconds = call.call_duration?.seconds || 0;
-    return sum + (minutes * 60) + seconds;
+    const duration = parseCallDuration(call.call_duration);
+    return sum + (duration.minutes * 60) + duration.seconds;
   }, 0);
 
   // Calculate average duration and format properly
@@ -644,7 +628,6 @@ const stats = useMemo(() => {
       agent: "",
       queue: "",
       disposition: "",
-      category: "",
       campaign: "",
       dateRange: "all",
       specificDate: "",
@@ -702,7 +685,7 @@ Feel free to ask me about:
 - **Call volumes and trends**
 - **Agent performance comparisons**
 - **Sentiment analysis insights**
-- **Category breakdowns**
+- **Disposition breakdowns**
 - **Transcript content analysis**
 
 Let's dive into your data!`,
@@ -975,36 +958,6 @@ Let's dive into your data!`,
                           className="text-white bg-bg-primary"
                         >
                           {disposition}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Category Filter */}
-                  <div className="flex-1 min-w-0">
-                    <label className="block text-xs font-bold text-white mb-1">
-                      Category
-                    </label>
-                    <select
-                      value={filters.category}
-                      onChange={(e) =>
-                        setFilters((prev) => ({
-                          ...prev,
-                          category: e.target.value,
-                        }))
-                      }
-                      className="w-full px-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 text-white"
-                    >
-                      <option value="" className="text-white bg-bg-primary">
-                        All Categories
-                      </option>
-                      {uniqueCategories.map((category) => (
-                        <option
-                          key={category}
-                          value={category}
-                          className="text-white bg-bg-primary"
-                        >
-                          {category}
                         </option>
                       ))}
                     </select>
@@ -1358,45 +1311,8 @@ Let's dive into your data!`,
                 </div>
               </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-  {/* Call Categories Breakdown */}
-  <div className="bg-bg-secondary rounded-lg shadow-sm border border-bg-secondary drop-shadow p-6">
-    <h3 className="text-lg font-semibold text-white mb-4">
-      Call Categories Breakdown
-    </h3>
-    <ResponsiveContainer width="100%" height={400}>
-      <BarChart
-        data={analyticsData.categoryData}
-        margin={{ top: 20, right: 30, left: 20, bottom: 60 }}
-      >
-        <CartesianGrid stroke="#272B2F" strokeDasharray="3 3" />
-        <XAxis
-          dataKey="category"
-          angle={-45}
-          textAnchor="end"
-          height={80}
-          interval={0}
-          fontSize={10}
-        />
-        <YAxis />
-        <Tooltip
-          contentStyle={{ backgroundColor: "black", color: "white", border: "none" }}
-          formatter={(value) => [value, "Call Count"]}
-          labelFormatter={(label) => {
-            const item = analyticsData.categoryData.find(
-              (d) => d.category === label
-            );
-            return item
-              ? `${item.fullCategory} (${item.percentage}%)`
-              : label;
-          }}
-        />
-        <Bar dataKey="count" fill="#8B5CF6" />
-      </BarChart>
-    </ResponsiveContainer>
-  </div>
-
-  {/* Call Disposition Breakdown */}
+            <div className="grid grid-cols-1 lg:grid-cols-1 gap-6">
+  {/* Call Disposition Breakdown - Full Width */}
   <div className="bg-bg-secondary rounded-lg shadow-sm border border-bg-secondary drop-shadow p-6">
     <h3 className="text-lg font-semibold text-white mb-4">
       Call Disposition Breakdown

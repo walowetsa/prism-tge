@@ -151,28 +151,50 @@ const CallLogDisplay = ({
     }
   };
 
-  // NEW: Function to get calls that need processing (locally)
+  // NEW: Function to get calls that need processing (locally) with enhanced debugging
   const getCallsNeedingProcessing = useCallback((allCallLogs: CallLog[], allSupabaseRecords: SupabaseCallRecord[]) => {
-    console.log(`🔍 Analyzing ${allCallLogs.length} call logs against ${allSupabaseRecords.length} Supabase records`);
+    console.log(`\n🔍 === ANALYZING CALLS FOR PROCESSING ===`);
+    console.log(`📊 Input: ${allCallLogs.length} call logs, ${allSupabaseRecords.length} Supabase records`);
     
     // Create a Set of contact IDs that exist in Supabase
     const supabaseContactIds = new Set(allSupabaseRecords.map(record => record.contact_id));
-    console.log(`📊 Found ${supabaseContactIds.size} contact IDs in Supabase`);
+    console.log(`📋 Contact IDs in Supabase: ${supabaseContactIds.size}`);
+    console.log(`📝 Sample Supabase contact IDs:`, Array.from(supabaseContactIds).slice(0, 5));
     
     // Filter call logs that need processing
     const needsProcessing = allCallLogs.filter(log => {
       // Must have recording location
-      if (!log.recording_location) return false;
+      if (!log.recording_location) {
+        return false;
+      }
       
       // Must not exist in Supabase
-      if (supabaseContactIds.has(log.contact_id)) return false;
+      if (supabaseContactIds.has(log.contact_id)) {
+        return false;
+      }
       
       return true;
     });
     
-    console.log(`🎯 Found ${needsProcessing.length} calls that need processing`);
-    console.log(`📝 Sample contact IDs needing processing:`, needsProcessing.slice(0, 10).map(c => c.contact_id));
+    console.log(`🎯 RESULT: Found ${needsProcessing.length} calls that need processing`);
     
+    if (needsProcessing.length > 0) {
+      console.log(`📝 Sample contact IDs needing processing:`, needsProcessing.slice(0, 5).map(c => c.contact_id));
+      console.log(`👥 Sample agents needing processing:`, needsProcessing.slice(0, 5).map(c => c.agent_username));
+    } else {
+      console.log(`✅ All calls already processed or missing recording locations`);
+      
+      // Debug why no calls need processing
+      const noRecording = allCallLogs.filter(log => !log.recording_location).length;
+      const alreadyExists = allCallLogs.filter(log => log.recording_location && supabaseContactIds.has(log.contact_id)).length;
+      
+      console.log(`📊 Breakdown:`);
+      console.log(`   - No recording location: ${noRecording}`);
+      console.log(`   - Already in Supabase: ${alreadyExists}`);
+      console.log(`   - Total call logs: ${allCallLogs.length}`);
+    }
+    
+    console.log(`🏁 === ANALYSIS COMPLETE ===\n`);
     return needsProcessing;
   }, []);
 
@@ -452,17 +474,23 @@ const CallLogDisplay = ({
     }
   };
 
-  // NEW: Simple auto-process function that iterates through ALL calls
+  // NEW: Simple auto-process function that iterates through ALL calls with enhanced debugging
   const autoProcessAllTranscriptions = async () => {
+    console.log(`\n🚀 === AUTO-PROCESSING STARTING ===`);
+    
     // Check global processing state
     const globalProcessingActive = sessionStorage.getItem(GLOBAL_PROCESSING_KEY);
     if (globalProcessingActive || isAutoProcessingRunning.current) {
       console.log('🚫 Auto-processing already running, skipping...');
+      console.log(`   - Global flag: ${globalProcessingActive}`);
+      console.log(`   - Local flag: ${isAutoProcessingRunning.current}`);
       return;
     }
 
-    console.log(`🎯 Starting auto-processing of ALL calls needing transcription`);
-    
+    console.log(`📊 Current data state:`);
+    console.log(`   - Call logs: ${callLogs.length}`);
+    console.log(`   - Supabase records: ${supabaseRecords.length}`);
+
     sessionStorage.setItem(GLOBAL_PROCESSING_KEY, Date.now().toString());
     isAutoProcessingRunning.current = true;
 
@@ -470,18 +498,23 @@ const CallLogDisplay = ({
     const callsNeedingProcessing = getCallsNeedingProcessing(callLogs, supabaseRecords);
     
     if (callsNeedingProcessing.length === 0) {
-      console.log('✅ No calls need processing - all done!');
+      console.log('✅ No calls need processing - stopping auto-processing');
       sessionStorage.removeItem(GLOBAL_PROCESSING_KEY);
       isAutoProcessingRunning.current = false;
       return;
     }
+
+    console.log(`🎯 PROCEEDING TO PROCESS ${callsNeedingProcessing.length} CALLS`);
 
     callsToProcess.current = callsNeedingProcessing;
     currentBatchIndex.current = 0;
 
     const totalBatches = Math.ceil(callsNeedingProcessing.length / BATCH_SIZE);
     
-    console.log(`📋 Will process ${callsNeedingProcessing.length} calls in ${totalBatches} batches of ${BATCH_SIZE}`);
+    console.log(`📋 Processing plan:`);
+    console.log(`   - Total calls to process: ${callsNeedingProcessing.length}`);
+    console.log(`   - Batch size: ${BATCH_SIZE}`);
+    console.log(`   - Total batches: ${totalBatches}`);
 
     setAutoProcessing({
       isRunning: true,
@@ -497,6 +530,8 @@ const CallLogDisplay = ({
     setProcessingErrors([]);
 
     try {
+      console.log(`🚀 STARTING BATCH PROCESSING...`);
+      
       for (let batchNum = 1; batchNum <= totalBatches; batchNum++) {
         currentBatchIndex.current = batchNum;
         
@@ -755,12 +790,23 @@ const CallLogDisplay = ({
                 </div>
                 <button
                   onClick={() => {
-                    console.log('🔄 Manual auto-processing restart requested');
+                    console.log('🔄 Manual auto-processing start requested by user');
+                    console.log(`📊 Current state: ${callLogs.length} call logs, ${supabaseRecords.length} Supabase records`);
                     autoProcessAllTranscriptions();
                   }}
                   className="px-2 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700"
                 >
-                  🚀 Start Processing
+                  🚀 Start Processing Now
+                </button>
+                <button
+                  onClick={() => {
+                    console.log('🔍 Manual analysis requested by user');
+                    const needed = getCallsNeedingProcessing(callLogs, supabaseRecords);
+                    console.log(`📊 Analysis result: ${needed.length} calls need processing`);
+                  }}
+                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
+                >
+                  🔍 Analyze Calls
                 </button>
               </div>
             )}

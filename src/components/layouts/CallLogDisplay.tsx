@@ -60,6 +60,7 @@ interface AutoProcessingState {
   processed: number;
   failed: number;
   remaining: number;
+  currentCallIndex: number; // NEW: Track which call we're on
 }
 
 interface SupabaseCallRecord {
@@ -85,7 +86,7 @@ type SortDirection = 'asc' | 'desc';
 const ITEMS_PER_PAGE = 100;
 const BATCH_SIZE = 5;
 
-// CRITICAL FIX: Global flag to prevent multiple auto-processing sessions
+// Global flag to prevent multiple auto-processing sessions
 const GLOBAL_PROCESSING_KEY = 'autoProcessingActive';
 
 const CallLogDisplay = ({
@@ -109,7 +110,8 @@ const CallLogDisplay = ({
     totalBatches: 0,
     processed: 0,
     failed: 0,
-    remaining: 0
+    remaining: 0,
+    currentCallIndex: 0
   });
   const [lastSupabaseUpdate, setLastSupabaseUpdate] = useState<string | null>(null);
   
@@ -119,19 +121,18 @@ const CallLogDisplay = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // Refs for tracking and cleanup
+  // NEW: Simple refs for tracking
   const autoProcessingInitiated = useRef<string | null>(null);
   const isAutoProcessingRunning = useRef<boolean>(false);
-  const processedContactIds = useRef<Set<string>>(new Set());
-  const currentBatchNumber = useRef<number>(0);
+  const callsToProcess = useRef<CallLog[]>([]); // NEW: Store all calls that need processing
+  const currentBatchIndex = useRef<number>(0); // NEW: Track which batch we're on
 
   // Fetch all transcribed calls from Supabase
   const fetchSupabaseRecords = async () => {
     setLoadingSupabase(true);
     try {
       const timestamp = new Date().toISOString();
-      console.log(`📊 [${timestamp}] Fetching all transcribed calls from Supabase...`);
-      console.log('⚠️ This should only happen ONCE on initial load or manual refresh');
+      console.log(`📊 [${timestamp}] Fetching Supabase records - ONE TIME ONLY`);
       
       const response = await fetch('/api/supabase/get-all-transcriptions');
       const data = await response.json();
@@ -139,7 +140,7 @@ const CallLogDisplay = ({
       if (data.success) {
         setSupabaseRecords(data.data || []);
         setLastSupabaseUpdate(new Date().toISOString());
-        console.log(`✅ [${timestamp}] Loaded ${data.data?.length || 0} transcribed calls from Supabase`);
+        console.log(`✅ [${timestamp}] Loaded ${data.data?.length || 0} Supabase records`);
       } else {
         console.error('Failed to fetch Supabase records:', data.error);
       }
@@ -149,6 +150,31 @@ const CallLogDisplay = ({
       setLoadingSupabase(false);
     }
   };
+
+  // NEW: Function to get calls that need processing (locally)
+  const getCallsNeedingProcessing = useCallback((allCallLogs: CallLog[], allSupabaseRecords: SupabaseCallRecord[]) => {
+    console.log(`🔍 Analyzing ${allCallLogs.length} call logs against ${allSupabaseRecords.length} Supabase records`);
+    
+    // Create a Set of contact IDs that exist in Supabase
+    const supabaseContactIds = new Set(allSupabaseRecords.map(record => record.contact_id));
+    console.log(`📊 Found ${supabaseContactIds.size} contact IDs in Supabase`);
+    
+    // Filter call logs that need processing
+    const needsProcessing = allCallLogs.filter(log => {
+      // Must have recording location
+      if (!log.recording_location) return false;
+      
+      // Must not exist in Supabase
+      if (supabaseContactIds.has(log.contact_id)) return false;
+      
+      return true;
+    });
+    
+    console.log(`🎯 Found ${needsProcessing.length} calls that need processing`);
+    console.log(`📝 Sample contact IDs needing processing:`, needsProcessing.slice(0, 10).map(c => c.contact_id));
+    
+    return needsProcessing;
+  }, []);
 
   // Merge call logs with Supabase records
   const mergedCallLogs = useMemo(() => {
@@ -160,7 +186,6 @@ const CallLogDisplay = ({
       const supabaseRecord = supabaseMap.get(log.contact_id);
       
       if (supabaseRecord) {
-        // Merge with Supabase data
         return {
           ...log,
           existsInSupabase: true,
@@ -174,7 +199,6 @@ const CallLogDisplay = ({
           updated_at: supabaseRecord.updated_at,
         };
       } else {
-        // Call log without transcription
         return {
           ...log,
           existsInSupabase: false,
@@ -363,114 +387,101 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process batch function
-  const processBatch = async (batchNumber: number) => {
-    if (!selectedDateRange) return false;
+  // NEW: Process a specific batch of calls directly (no API exclusion logic)
+  const processSpecificBatch = async (batchCalls: CallLog[], batchNumber: number) => {
+    console.log(`\n🚀 === PROCESSING BATCH ${batchNumber} ===`);
+    console.log(`📋 Processing ${batchCalls.length} specific calls:`);
+    batchCalls.forEach((call, idx) => {
+      console.log(`   ${idx + 1}. ${call.contact_id} (${call.agent_username})`);
+    });
 
     try {
-      const excludeContactIds = Array.from(processedContactIds.current);
+      // Use the POST endpoint to process specific contact IDs
+      const contactIds = batchCalls.map(call => call.contact_id);
       
-      const params = new URLSearchParams({
-        startDate: selectedDateRange.start.toISOString(),
-        endDate: selectedDateRange.end.toISOString(),
-        processTranscriptions: 'true',
-        maxProcessCount: BATCH_SIZE.toString(),
-        excludeContactIds: excludeContactIds.join(','),
+      const response = await fetch('/api/process-calls', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contactIds: contactIds,
+          processTranscriptions: true
+        }),
       });
 
-      console.log(`🚀 Processing batch ${batchNumber} (max ${BATCH_SIZE} calls, excluding ${excludeContactIds.length} already processed)...`);
-      console.log(`📋 First 10 excluded contact IDs:`, excludeContactIds.slice(0, 10));
-
-      const response = await fetch(`/api/process-calls?${params}`);
       const data = await response.json();
 
       if (data.success) {
-        // Track newly processed contact IDs
-        if (data.processedContactIds && Array.isArray(data.processedContactIds)) {
-          data.processedContactIds.forEach((id: string) => {
-            processedContactIds.current.add(id);
-          });
-          console.log(`📝 Added ${data.processedContactIds.length} new contact IDs to exclusion list`);
-          console.log(`📊 Total exclusion list size: ${processedContactIds.current.size}`);
-        }
+        const processed = data.summary.processedThisRequest || 0;
+        const errors = data.errors?.length || 0;
 
-        // CRITICAL FIX: Do NOT refresh Supabase data - only use API response data
-        console.log('✅ Skipping Supabase refresh - using API response data only');
+        console.log(`✅ Batch ${batchNumber} completed:`);
+        console.log(`   - Processed: ${processed}/${batchCalls.length} calls`);
+        console.log(`   - Errors: ${errors} calls`);
 
         // Handle processing errors
         if (data.errors && data.errors.length > 0) {
           setProcessingErrors(prev => [...prev, ...data.errors]);
         }
 
-        // Update auto-processing state
-        const processed = data.summary.processedThisRequest || 0;
-        const errors = data.errors?.length || 0;
-        const remaining = data.summary.missingTranscriptions || 0;
-
+        // Update state
         setAutoProcessing(prev => ({
           ...prev,
           processed: prev.processed + processed,
           failed: prev.failed + errors,
-          remaining: remaining
+          currentCallIndex: prev.currentCallIndex + batchCalls.length
         }));
 
-        console.log(`✅ Batch ${batchNumber} completed:`);
-        console.log(`   - Processed: ${processed} calls`);
-        console.log(`   - Errors: ${errors} calls`);
-        console.log(`   - Remaining: ${remaining} calls`);
-        
-        const hasMoreWork = remaining > 0;
-        console.log(`🤔 Has more work after batch ${batchNumber}? ${hasMoreWork}`);
-        
-        return hasMoreWork;
+        return { processed, errors };
       } else {
         console.error(`❌ Batch ${batchNumber} failed:`, data.error);
         setAutoProcessing(prev => ({
           ...prev,
-          failed: prev.failed + 1
+          failed: prev.failed + batchCalls.length
         }));
-        return false;
+        return { processed: 0, errors: batchCalls.length };
       }
     } catch (err) {
       console.error(`❌ Network error in batch ${batchNumber}:`, err);
       setAutoProcessing(prev => ({
         ...prev,
-        failed: prev.failed + 1
+        failed: prev.failed + batchCalls.length
       }));
-      return false;
+      return { processed: 0, errors: batchCalls.length };
     }
   };
 
-  // Auto-process all transcriptions
-  const autoProcessAllTranscriptions = async (missingCount: number) => {
-    if (missingCount === 0) {
-      console.log('🚫 No missing transcriptions to process');
-      return;
-    }
-
+  // NEW: Simple auto-process function that iterates through ALL calls
+  const autoProcessAllTranscriptions = async () => {
     // Check global processing state
     const globalProcessingActive = sessionStorage.getItem(GLOBAL_PROCESSING_KEY);
-    if (globalProcessingActive) {
-      console.log('🚫 Auto-processing already running in another session/tab, skipping...');
+    if (globalProcessingActive || isAutoProcessingRunning.current) {
+      console.log('🚫 Auto-processing already running, skipping...');
       return;
     }
 
-    if (isAutoProcessingRunning.current) {
-      console.log('🚫 Auto-processing already running in this session, skipping...');
-      return;
-    }
-
-    console.log(`🎯 Starting auto-processing: ${missingCount} calls missing`);
+    console.log(`🎯 Starting auto-processing of ALL calls needing transcription`);
     
     sessionStorage.setItem(GLOBAL_PROCESSING_KEY, Date.now().toString());
     isAutoProcessingRunning.current = true;
 
-    processedContactIds.current.clear();
-    currentBatchNumber.current = 0;
-
-    const totalBatches = Math.ceil(missingCount / BATCH_SIZE);
+    // Get all calls that need processing
+    const callsNeedingProcessing = getCallsNeedingProcessing(callLogs, supabaseRecords);
     
-    console.log(`📋 Planning: ${totalBatches} batches of ${BATCH_SIZE} calls each`);
+    if (callsNeedingProcessing.length === 0) {
+      console.log('✅ No calls need processing - all done!');
+      sessionStorage.removeItem(GLOBAL_PROCESSING_KEY);
+      isAutoProcessingRunning.current = false;
+      return;
+    }
+
+    callsToProcess.current = callsNeedingProcessing;
+    currentBatchIndex.current = 0;
+
+    const totalBatches = Math.ceil(callsNeedingProcessing.length / BATCH_SIZE);
+    
+    console.log(`📋 Will process ${callsNeedingProcessing.length} calls in ${totalBatches} batches of ${BATCH_SIZE}`);
 
     setAutoProcessing({
       isRunning: true,
@@ -478,68 +489,49 @@ const CallLogDisplay = ({
       totalBatches,
       processed: 0,
       failed: 0,
-      remaining: missingCount
+      remaining: callsNeedingProcessing.length,
+      currentCallIndex: 0
     });
 
     setProcessing(true);
     setProcessingErrors([]);
 
-    let currentBatch = 1;
-    let hasMoreToProcess = true;
-    let consecutiveEmptyBatches = 0;
-    const MAX_EMPTY_BATCHES = 3;
-
     try {
-      while (hasMoreToProcess && currentBatch <= totalBatches && consecutiveEmptyBatches < MAX_EMPTY_BATCHES) {
-        currentBatchNumber.current = currentBatch;
+      for (let batchNum = 1; batchNum <= totalBatches; batchNum++) {
+        currentBatchIndex.current = batchNum;
         
         setAutoProcessing(prev => ({
           ...prev,
-          currentBatch
+          currentBatch: batchNum
         }));
 
-        const excludedCount = processedContactIds.current.size;
-        console.log(`\n🚀 === BATCH ${currentBatch}/${totalBatches} STARTING ===`);
-        console.log(`📊 Processed so far: ${excludedCount} calls`);
+        // Get the next batch of calls
+        const startIdx = (batchNum - 1) * BATCH_SIZE;
+        const endIdx = Math.min(startIdx + BATCH_SIZE, callsNeedingProcessing.length);
+        const batchCalls = callsNeedingProcessing.slice(startIdx, endIdx);
 
-        const batchStartProcessedCount = autoProcessing.processed;
-        hasMoreToProcess = await processBatch(currentBatch);
-        const batchEndProcessedCount = autoProcessing.processed;
-        
-        const batchProcessedCount = batchEndProcessedCount - batchStartProcessedCount;
-        console.log(`📊 Batch ${currentBatch} results: ${batchProcessedCount} processed`);
-        
-        if (batchProcessedCount === 0) {
-          consecutiveEmptyBatches++;
-          console.log(`⚠️ Empty batch ${currentBatch} (${consecutiveEmptyBatches}/${MAX_EMPTY_BATCHES} consecutive)`);
-        } else {
-          consecutiveEmptyBatches = 0;
-          console.log(`✅ Successful batch ${currentBatch}: ${batchProcessedCount} calls processed`);
-        }
-        
-        if (!hasMoreToProcess) {
-          console.log(`✅ No more transcriptions needed after batch ${currentBatch}`);
-          break;
-        }
+        console.log(`\n📊 BATCH ${batchNum}/${totalBatches}: Processing calls ${startIdx + 1}-${endIdx} of ${callsNeedingProcessing.length}`);
 
-        if (consecutiveEmptyBatches >= MAX_EMPTY_BATCHES) {
-          console.log(`🛑 Stopping: ${MAX_EMPTY_BATCHES} consecutive empty batches indicate no more work`);
-          break;
-        }
+        const result = await processSpecificBatch(batchCalls, batchNum);
 
-        if (currentBatch < totalBatches) {
-          console.log(`⏸️ Waiting 8 seconds before batch ${currentBatch + 1}...`);
-          await new Promise(resolve => setTimeout(resolve, 8000));
-        }
+        // Update remaining count
+        const remaining = callsNeedingProcessing.length - endIdx;
+        setAutoProcessing(prev => ({
+          ...prev,
+          remaining: remaining
+        }));
 
-        currentBatch++;
-        console.log(`🏁 === BATCH ${currentBatch - 1}/${totalBatches} COMPLETED ===\n`);
+        console.log(`📊 Progress: ${endIdx}/${callsNeedingProcessing.length} calls processed, ${remaining} remaining`);
+
+        // Wait between batches
+        if (batchNum < totalBatches) {
+          console.log(`⏸️ Waiting 5 seconds before next batch...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
       }
     } catch (error) {
       console.error('❌ Error in auto-processing:', error);
     } finally {
-      const totalProcessed = processedContactIds.current.size;
-      
       setAutoProcessing(prev => ({
         ...prev,
         isRunning: false
@@ -551,13 +543,14 @@ const CallLogDisplay = ({
       isAutoProcessingRunning.current = false;
 
       console.log(`\n🎉 === AUTO-PROCESSING COMPLETED ===`);
-      console.log(`📊 Total unique calls processed: ${totalProcessed}`);
-      console.log(`🚫 Supabase will NOT be fetched again - only checked once on initial load`);
+      console.log(`📊 Total calls processed: ${autoProcessing.processed}`);
+      console.log(`❌ Total failures: ${autoProcessing.failed}`);
       
-      processedContactIds.current.clear();
-      currentBatchNumber.current = 0;
+      // Clear refs
+      callsToProcess.current = [];
+      currentBatchIndex.current = 0;
       
-      console.log(`🧹 Cleared tracking state and global processing flag`);
+      console.log(`🧹 Auto-processing session complete`);
     }
   };
 
@@ -603,11 +596,12 @@ const CallLogDisplay = ({
         totalBatches: 0,
         processed: 0,
         failed: 0,
-        remaining: 0
+        remaining: 0,
+        currentCallIndex: 0
       });
 
       try {
-        console.log('🔍 Step 1: Fetching Supabase transcriptions (ONLY ON INITIAL LOAD)...');
+        console.log('🔍 Step 1: Fetching Supabase records (ONE TIME ONLY)...');
         await fetchSupabaseRecords();
 
         console.log('📊 Step 2: Fetching call logs from database...');
@@ -623,33 +617,22 @@ const CallLogDisplay = ({
         if (data.success) {
           setCallLogs(data.data || []);
           console.log('📋 Call logs loaded:', data.summary);
-          console.log('🚫 Supabase will NOT be checked again automatically');
 
-          const missing = data.summary.missingTranscriptions;
           const shouldStartAutoProcessing = (
-            missing > 0 && 
             autoProcessingInitiated.current !== dateRangeKey && 
             !isAutoProcessingRunning.current
           );
           
-          console.log(`🤔 Should start auto-processing? ${shouldStartAutoProcessing}`);
-          console.log(`   - Missing: ${missing}`);
-          console.log(`   - Not initiated for this date range: ${autoProcessingInitiated.current !== dateRangeKey}`);
-          console.log(`   - Not currently running: ${!isAutoProcessingRunning.current}`);
-          
           if (shouldStartAutoProcessing) {
             autoProcessingInitiated.current = dateRangeKey;
-            console.log(`🚀 Auto-starting transcription processing for ${missing} missing calls...`);
+            console.log(`🚀 Will start auto-processing after data loads...`);
             
+            // Start auto-processing after a delay to ensure state is settled
             setTimeout(() => {
               if (!isAutoProcessingRunning.current) {
-                autoProcessAllTranscriptions(missing);
-              } else {
-                console.log('🚫 Auto-processing started elsewhere, canceling delayed start');
+                autoProcessAllTranscriptions();
               }
-            }, 1000);
-          } else {
-            console.log('⏭️ Skipping auto-processing start');
+            }, 2000);
           }
 
         } else {
@@ -664,7 +647,7 @@ const CallLogDisplay = ({
     };
 
     fetchCallLogs();
-  }, [selectedDateRange, checkSupabase]);
+  }, [selectedDateRange, checkSupabase, getCallsNeedingProcessing]);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
@@ -688,7 +671,7 @@ const CallLogDisplay = ({
         <div className="flex items-center gap-2">
           {lastSupabaseUpdate && (
             <div className="text-xs text-gray-400">
-              Last updated: {new Date(lastSupabaseUpdate).toLocaleTimeString()}
+              Supabase loaded: {new Date(lastSupabaseUpdate).toLocaleTimeString()}
             </div>
           )}
           <Link
@@ -708,7 +691,7 @@ const CallLogDisplay = ({
             <h6 className="text-sm text-white">
               Call Data for {selectedDateRange.label}
               {loadingSupabase && (
-                <span className="ml-2 text-xs text-yellow-400">🔄 Refreshing transcriptions...</span>
+                <span className="ml-2 text-xs text-yellow-400">🔄 Loading Supabase data...</span>
               )}
             </h6>
           </div>
@@ -716,9 +699,9 @@ const CallLogDisplay = ({
           {/* Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              📊 Supabase checked ONLY on initial load - no repeated background checking
+              📊 Simple approach: Load all data once, then process ALL calls that need transcription (no repeated checking)
               {isAutoProcessingRunning.current && (
-                <span className="ml-2 text-yellow-400">(Currently auto-processing)</span>
+                <span className="ml-2 text-yellow-400">(Currently processing)</span>
               )}
             </div>
           </div>
@@ -727,14 +710,14 @@ const CallLogDisplay = ({
           {autoProcessing.isRunning && (
             <div className="mb-4 p-4 bg-blue-900 border border-blue-600 rounded-lg">
               <div className="text-sm text-blue-300 font-medium mb-2">
-                🤖 Auto-Processing Transcriptions (Batch Progression)
+                🤖 Processing ALL Calls That Need Transcription
               </div>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-blue-200">
                 <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}/{autoProcessing.totalBatches}</span></div>
                 <div>Processed: <span className="text-green-400 font-medium">{autoProcessing.processed}</span></div>
                 <div>Failed: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
                 <div>Remaining: <span className="text-yellow-400 font-medium">{autoProcessing.remaining}</span></div>
-                <div>Excluded: <span className="text-gray-400 font-medium">{processedContactIds.current.size}</span></div>
+                <div>Progress: <span className="text-blue-400 font-medium">{autoProcessing.currentCallIndex}/{callsToProcess.current.length}</span></div>
               </div>
               <div className="mt-2">
                 <div className="w-full bg-blue-800 rounded-full h-2">
@@ -746,7 +729,7 @@ const CallLogDisplay = ({
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 8-second delays (Supabase checked only once on initial load)
+                  Processing {BATCH_SIZE} calls per batch - iterating through ALL calls that need transcription
                 </div>
               </div>
             </div>
@@ -755,29 +738,29 @@ const CallLogDisplay = ({
           {/* Enhanced Processing Summary */}
           <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
             <div className="text-sm text-[#4ecca3] font-medium mb-2">
-              📊 Live Processing Summary
+              📊 Processing Summary
             </div>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
               <div>Total Calls: <span className="text-white font-medium">{calculatedSummary.totalCalls}</span></div>
               <div>Transcribed: <span className="text-green-400 font-medium">{calculatedSummary.existingTranscriptions}</span></div>
               <div>Missing: <span className="text-yellow-400 font-medium">{calculatedSummary.missingTranscriptions}</span></div>
-              <div>Auto-Processed: <span className="text-blue-400 font-medium">{autoProcessing.processed}</span></div>
+              <div>Processed: <span className="text-blue-400 font-medium">{autoProcessing.processed}</span></div>
               <div>Errors: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
             </div>
             
             {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
               <div className="mt-3 flex items-center gap-2">
                 <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions (Supabase checked only once on load)
+                  🤖 Auto-processing will iterate through ALL calls that need transcription
                 </div>
                 <button
                   onClick={() => {
-                    console.log('🔄 Manual Supabase refresh requested by user');
-                    fetchSupabaseRecords();
+                    console.log('🔄 Manual auto-processing restart requested');
+                    autoProcessAllTranscriptions();
                   }}
-                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
+                  className="px-2 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700"
                 >
-                  🔄 Manual Supabase Refresh
+                  🚀 Start Processing
                 </button>
               </div>
             )}
@@ -843,8 +826,8 @@ const CallLogDisplay = ({
             <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
               <div className="text-yellow-200">
                 {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (Supabase checked only once - no repeated checking, ${processedContactIds.current.size} excluded)...` 
-                  : '🚀 Processing transcriptions...'
+                  ? `🤖 Processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} - Call ${autoProcessing.currentCallIndex}/${callsToProcess.current.length}` 
+                  : '🚀 Starting transcription processing...'
                 }
               </div>
             </div>

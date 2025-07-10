@@ -2,9 +2,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // app/api/process-calls/route.ts - Unified call processing workflow
 
-import { NextRequest, NextResponse } from 'next/server';
-import { Pool } from 'pg';
-import { createClient } from '@supabase/supabase-js';
+import { NextRequest, NextResponse } from "next/server";
+import { Pool } from "pg";
+import { createClient } from "@supabase/supabase-js";
 import { Client } from "ssh2";
 import { readFileSync } from "fs";
 import * as path from "path";
@@ -37,7 +37,9 @@ function getSftpConfig(): SftpConfig {
     host: process.env.SFTP_HOST!,
     port: parseInt(process.env.SFTP_PORT!),
     username: process.env.SFTP_USERNAME!,
-    privateKey: readFileSync(path.resolve(process.env.HOME || "~", ".ssh/sftp_key")),
+    privateKey: readFileSync(
+      path.resolve(process.env.HOME || "~", ".ssh/sftp_key")
+    ),
     passphrase: process.env.SFTP_PASSPHRASE!,
   };
 }
@@ -121,97 +123,103 @@ async function getContactLogs(dateRange?: DateRange) {
     const result = await pool.query(query, params);
     return result.rows;
   } catch (error) {
-    console.error('Database query error:', error);
+    console.error("Database query error:", error);
     throw error;
   }
 }
 
 // Helper function to check Supabase status for call logs
-async function enhanceCallLogsWithSupabaseStatus(logs: CallLog[]): Promise<CallLog[]> {
+async function enhanceCallLogsWithSupabaseStatus(
+  logs: CallLog[]
+): Promise<CallLog[]> {
   try {
     if (logs.length === 0) return logs;
 
-    const contactIds = logs.map(log => log.contact_id);
-    
+    const contactIds = logs.map((log) => log.contact_id);
+
     const { data: existingRecords, error } = await supabase
-      .from('call_records')
-      .select('contact_id')
-      .in('contact_id', contactIds);
+      .from("call_records")
+      .select("contact_id")
+      .in("contact_id", contactIds);
 
     if (error) {
-      console.error('Error checking Supabase status:', error);
-      return logs.map(log => ({ ...log, existsInSupabase: false }));
+      console.error("Error checking Supabase status:", error);
+      return logs.map((log) => ({ ...log, existsInSupabase: false }));
     }
 
-    const existingContactIds = new Set(existingRecords?.map(record => record.contact_id) || []);
+    const existingContactIds = new Set(
+      existingRecords?.map((record) => record.contact_id) || []
+    );
 
-    return logs.map(log => ({
+    return logs.map((log) => ({
       ...log,
-      existsInSupabase: existingContactIds.has(log.contact_id)
+      existsInSupabase: existingContactIds.has(log.contact_id),
     }));
   } catch (error) {
-    console.error('Error enhancing call logs with Supabase status:', error);
-    return logs.map(log => ({ ...log, existsInSupabase: false }));
+    console.error("Error enhancing call logs with Supabase status:", error);
+    return logs.map((log) => ({ ...log, existsInSupabase: false }));
   }
 }
 
 // Helper function to construct SFTP paths
 function constructSftpPath(filename: string): string[] {
   const possiblePaths = [];
-  
+
   let decodedFilename = filename;
   try {
     decodedFilename = decodeURIComponent(filename);
   } catch (error) {
     console.log(`Could not decode filename: ${filename}`);
   }
-  
-  if (decodedFilename.includes('/')) {
+
+  if (decodedFilename.includes("/")) {
     let cleanPath = decodedFilename;
-    
-    if (cleanPath.startsWith('amazon-connect-b1a9c08821e5/')) {
-      cleanPath = cleanPath.replace('amazon-connect-b1a9c08821e5/', '');
+
+    if (cleanPath.startsWith("amazon-connect-b1a9c08821e5/")) {
+      cleanPath = cleanPath.replace("amazon-connect-b1a9c08821e5/", "");
     }
-    
-    if (!cleanPath.startsWith('./') && !cleanPath.startsWith('/')) {
+
+    if (!cleanPath.startsWith("./") && !cleanPath.startsWith("/")) {
       cleanPath = `./${cleanPath}`;
     }
-    
+
     possiblePaths.push(cleanPath);
-    
-    if (cleanPath.startsWith('./')) {
+
+    if (cleanPath.startsWith("./")) {
       possiblePaths.push(cleanPath.substring(2));
     }
   }
-  
-  const justFilename = decodedFilename.split('/').pop() || decodedFilename;
-  
+
+  const justFilename = decodedFilename.split("/").pop() || decodedFilename;
+
   // Try current date and previous 7 days
   const currentDate = new Date();
   for (let daysBack = 0; daysBack <= 7; daysBack++) {
     const targetDate = new Date(currentDate);
     targetDate.setDate(currentDate.getDate() - daysBack);
-    
+
     const year = targetDate.getFullYear();
     const month = targetDate.getMonth() + 1;
     const day = targetDate.getDate();
-    
-    const datePath = `${year}/${month.toString().padStart(2, '0')}/${day.toString().padStart(2, '0')}`;
-    
+
+    const datePath = `${year}/${month.toString().padStart(2, "0")}/${day
+      .toString()
+      .padStart(2, "0")}`;
+
     possiblePaths.push(`./${datePath}/${justFilename}`);
     possiblePaths.push(`${datePath}/${justFilename}`);
   }
-  
+
   possiblePaths.push(`./${justFilename}`);
   possiblePaths.push(justFilename);
-  
+
   return Array.from(new Set(possiblePaths));
 }
 
 // Helper function to download audio file from SFTP
 async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
   const sftpConfig = getSftpConfig();
-  
+
   return new Promise<Buffer>((resolve, reject) => {
     const conn = new Client();
     let resolved = false;
@@ -246,12 +254,12 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
         sftpSession = sftp;
         const possiblePaths = constructSftpPath(filename);
         console.log(`Searching ${possiblePaths.length} paths for ${filename}`);
-        
+
         let pathIndex = 0;
-        
+
         const tryNextPath = async () => {
           if (resolved) return;
-          
+
           if (pathIndex >= possiblePaths.length) {
             console.error(`File not found in ${possiblePaths.length} paths`);
             if (!resolved) {
@@ -261,24 +269,30 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
             }
             return;
           }
-          
+
           const currentPath = possiblePaths[pathIndex];
-          console.log(`Trying path ${pathIndex + 1}/${possiblePaths.length}: ${currentPath}`);
-          
+          console.log(
+            `Trying path ${pathIndex + 1}/${
+              possiblePaths.length
+            }: ${currentPath}`
+          );
+
           try {
-            const stats = await new Promise<any>((resolveStats, rejectStats) => {
-              sftp.stat(currentPath, (statErr, statsResult) => {
-                if (statErr) {
-                  rejectStats(statErr);
-                } else {
-                  resolveStats(statsResult);
-                }
-              });
-            });
+            const stats = await new Promise<any>(
+              (resolveStats, rejectStats) => {
+                sftp.stat(currentPath, (statErr, statsResult) => {
+                  if (statErr) {
+                    rejectStats(statErr);
+                  } else {
+                    resolveStats(statsResult);
+                  }
+                });
+              }
+            );
 
             const sizeInMB = stats.size / (1024 * 1024);
             console.log(`Found file: ${sizeInMB.toFixed(2)}MB`);
-            
+
             if (stats.size === 0) {
               console.log(`Empty file, trying next`);
               pathIndex++;
@@ -292,41 +306,55 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
             }
 
             console.log(`Downloading ${stats.size} bytes`);
-            
-            const fileData = await new Promise<Buffer>((resolveDownload, rejectDownload) => {
-              const fileBuffers: Buffer[] = [];
-              let totalBytesReceived = 0;
-              
-              const readStream = sftp.createReadStream(currentPath, {
-                highWaterMark: 256 * 1024,
-              });
 
-              readStream.on("error", (readErr: Error) => {
-                console.error(`Stream error: ${readErr.message}`);
-                rejectDownload(readErr);
-              });
+            const fileData = await new Promise<Buffer>(
+              (resolveDownload, rejectDownload) => {
+                const fileBuffers: Buffer[] = [];
+                let totalBytesReceived = 0;
 
-              readStream.on("data", (chunk: Buffer) => {
-                fileBuffers.push(chunk);
-                totalBytesReceived += chunk.length;
-                
-                if (totalBytesReceived % (1024 * 1024) < chunk.length) {
-                  const progress = ((totalBytesReceived / stats.size) * 100).toFixed(0);
-                  console.log(`Progress: ${progress}% (${(totalBytesReceived / (1024 * 1024)).toFixed(1)}MB)`);
-                }
-              });
+                const readStream = sftp.createReadStream(currentPath, {
+                  highWaterMark: 256 * 1024,
+                });
 
-              readStream.on("end", () => {
-                const audioBuffer = Buffer.concat(fileBuffers);
-                console.log(`Downloaded: ${audioBuffer.length} bytes`);
-                
-                if (audioBuffer.length !== stats.size) {
-                  rejectDownload(new Error(`Size mismatch: expected ${stats.size}, got ${audioBuffer.length}`));
-                } else {
-                  resolveDownload(audioBuffer);
-                }
-              });
-            });
+                readStream.on("error", (readErr: Error) => {
+                  console.error(`Stream error: ${readErr.message}`);
+                  rejectDownload(readErr);
+                });
+
+                readStream.on("data", (chunk: Buffer) => {
+                  fileBuffers.push(chunk);
+                  totalBytesReceived += chunk.length;
+
+                  if (totalBytesReceived % (1024 * 1024) < chunk.length) {
+                    const progress = (
+                      (totalBytesReceived / stats.size) *
+                      100
+                    ).toFixed(0);
+                    console.log(
+                      `Progress: ${progress}% (${(
+                        totalBytesReceived /
+                        (1024 * 1024)
+                      ).toFixed(1)}MB)`
+                    );
+                  }
+                });
+
+                readStream.on("end", () => {
+                  const audioBuffer = Buffer.concat(fileBuffers);
+                  console.log(`Downloaded: ${audioBuffer.length} bytes`);
+
+                  if (audioBuffer.length !== stats.size) {
+                    rejectDownload(
+                      new Error(
+                        `Size mismatch: expected ${stats.size}, got ${audioBuffer.length}`
+                      )
+                    );
+                  } else {
+                    resolveDownload(audioBuffer);
+                  }
+                });
+              }
+            );
 
             if (!resolved) {
               resolved = true;
@@ -334,14 +362,17 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
               resolve(fileData);
             }
             return;
-
           } catch (error) {
-            console.log(`Error with path ${pathIndex + 1}: ${error instanceof Error ? error.message : 'Unknown'}`);
+            console.log(
+              `Error with path ${pathIndex + 1}: ${
+                error instanceof Error ? error.message : "Unknown"
+              }`
+            );
             pathIndex++;
             setTimeout(tryNextPath, 200);
           }
         };
-        
+
         tryNextPath();
       });
     });
@@ -361,7 +392,7 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
         keepaliveInterval: 30000,
         keepaliveCountMax: 10,
         algorithms: {
-          compress: ['none'],
+          compress: ["none"],
         },
         tryKeyboard: false,
       });
@@ -376,12 +407,15 @@ async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
 }
 
 // Helper function to upload audio to AssemblyAI
-async function uploadToAssemblyAI(audioBuffer: Buffer, apiKey: string): Promise<string> {
+async function uploadToAssemblyAI(
+  audioBuffer: Buffer,
+  apiKey: string
+): Promise<string> {
   console.log("Uploading audio to AssemblyAI...");
-  
+
   // Convert Buffer to Uint8Array for fetch compatibility
   const uint8Array = new Uint8Array(audioBuffer);
-  
+
   const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
     method: "POST",
     headers: {
@@ -393,7 +427,9 @@ async function uploadToAssemblyAI(audioBuffer: Buffer, apiKey: string): Promise<
 
   if (!uploadResponse.ok) {
     const errorText = await uploadResponse.text();
-    throw new Error(`AssemblyAI upload failed: ${uploadResponse.status} - ${errorText}`);
+    throw new Error(
+      `AssemblyAI upload failed: ${uploadResponse.status} - ${errorText}`
+    );
   }
 
   const { upload_url } = await uploadResponse.json();
@@ -408,7 +444,8 @@ async function performTopicCategorization(transcriptData: any): Promise<{
   confidence: number;
 } | null> {
   try {
-    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101";
+    const serverUrl =
+      process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101";
 
     const response = await fetch(`${serverUrl}/api/openAI/categorise`, {
       method: "POST",
@@ -440,37 +477,110 @@ async function performTopicCategorization(transcriptData: any): Promise<{
 }
 
 // Helper function to transcribe audio with AssemblyAI
-async function transcribeAudio(uploadUrl: string, speakerCount: number = 2): Promise<any> {
+async function transcribeAudio(
+  uploadUrl: string,
+  speakerCount: number = 2
+): Promise<any> {
   const apiKey = process.env.ASSEMBLYAI_API_KEY!;
-  
+
   console.log("Submitting transcription to AssemblyAI...");
-  
-  const transcriptResponse = await fetch("https://api.assemblyai.com/v2/transcript", {
-    method: "POST",
-    headers: {
-      Authorization: apiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      audio_url: uploadUrl,
-      speech_model: "best",
-      speaker_labels: true,
-      speakers_expected: speakerCount,
-      summarization: true,
-      summary_model: "conversational",
-      summary_type: "paragraph",
-      entity_detection: true,
-      sentiment_analysis: true,
-      filter_profanity: false,
-      auto_highlights: true,
-      punctuate: true,
-      format_text: true,
-    }),
-  });
+
+  const transcriptResponse = await fetch(
+    "https://api.assemblyai.com/v2/transcript",
+    {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        audio_url: uploadUrl,
+        speech_model: "best",
+        keyterms_prompt: [
+          "Team",
+          "Global",
+          "Express",
+          "Freight",
+          "Referred",
+          "You're",
+          "Logistics",
+          "Calling",
+          "Regards",
+          "Referral",
+          "Transportation",
+          "Shipment",
+          "Supply Chain",
+          "Carrier",
+          "Warehouse",
+          "Cargo",
+          "Dispatch",
+          "Consignment",
+          "Tracking",
+          "Delivery",
+          "Inventory",
+          "Import",
+          "Export",
+          "Port",
+          "Barge",
+          "Forwarding",
+          "Customs",
+          "Route",
+          "Tracking Number",
+          "Handling",
+          "Third-party",
+          "Broker",
+          "Load",
+          "Pallet",
+          "Shipping",
+          "Logistics Management",
+          "Freight Forwarder",
+          "Fleet",
+          "Intermodal",
+          "Air Freight",
+          "Sea Freight",
+          "Freight Rates",
+          "Lead Time",
+          "Shipping Label",
+          "Warehouse Management",
+          "Distribution",
+          "Freight Broker",
+          "Freight Consolidation",
+          "Cross-docking",
+          "Port of Entry",
+          "Drop-off",
+          "Pickup",
+          "Route Optimization",
+          "Fleet Management",
+          "Supply Chain Solutions",
+          "Full Truckload",
+          "Less-than-Truckload",
+          "3PL",
+          "Logistics Provider",
+          "Transporter",
+          "Freight Class",
+          "Shipping Terms",
+          "Logistics Network",
+        ],
+        speaker_labels: true,
+        speakers_expected: speakerCount,
+        summarization: true,
+        summary_model: "conversational",
+        summary_type: "paragraph",
+        entity_detection: true,
+        sentiment_analysis: true,
+        filter_profanity: false,
+        auto_highlights: true,
+        punctuate: true,
+        format_text: true,
+      }),
+    }
+  );
 
   if (!transcriptResponse.ok) {
     const errorData = await transcriptResponse.json();
-    throw new Error(`AssemblyAI submission failed: ${JSON.stringify(errorData)}`);
+    throw new Error(
+      `AssemblyAI submission failed: ${JSON.stringify(errorData)}`
+    );
   }
 
   const { id } = await transcriptResponse.json();
@@ -483,13 +593,19 @@ async function transcribeAudio(uploadUrl: string, speakerCount: number = 2): Pro
   const maxAttempts = 120; // 10 minutes at 5-second intervals
   const pollInterval = 5000;
 
-  while ((status === "processing" || status === "queued") && attempts < maxAttempts) {
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  while (
+    (status === "processing" || status === "queued") &&
+    attempts < maxAttempts
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
     attempts++;
 
-    const statusResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-      headers: { Authorization: apiKey },
-    });
+    const statusResponse = await fetch(
+      `https://api.assemblyai.com/v2/transcript/${id}`,
+      {
+        headers: { Authorization: apiKey },
+      }
+    );
 
     if (!statusResponse.ok) {
       throw new Error(`Status check failed: ${statusResponse.status}`);
@@ -497,22 +613,27 @@ async function transcribeAudio(uploadUrl: string, speakerCount: number = 2): Pro
 
     transcript = await statusResponse.json();
     status = transcript.status;
-    
-    if (attempts % 12 === 0) { // Log every minute
+
+    if (attempts % 12 === 0) {
+      // Log every minute
       console.log(`Transcription status after ${attempts * 5}s: ${status}`);
     }
-    
+
     if (status === "completed" || status === "error") {
       break;
     }
   }
 
   if (status === "error") {
-    throw new Error(`Transcription failed: ${transcript?.error || "Unknown error"}`);
+    throw new Error(
+      `Transcription failed: ${transcript?.error || "Unknown error"}`
+    );
   }
 
   if (status !== "completed") {
-    throw new Error(`Transcription timed out after ${maxAttempts * pollInterval / 1000}s`);
+    throw new Error(
+      `Transcription timed out after ${(maxAttempts * pollInterval) / 1000}s`
+    );
   }
 
   console.log("Transcription completed successfully");
@@ -548,10 +669,17 @@ async function saveTranscriptionToSupabase(
       transcript_text: transcriptData.text || "",
       queue_name: callData.queue_name || "",
       agent_username: callData.agent_username || "",
-      initiation_timestamp: callData.initiation_timestamp || new Date().toISOString(),
-      speaker_data: transcriptData.utterances ? JSON.stringify(transcriptData.utterances) : null,
-      sentiment_analysis: transcriptData.sentiment_analysis_results ? JSON.stringify(transcriptData.sentiment_analysis_results) : null,
-      entities: transcriptData.entities ? JSON.stringify(transcriptData.entities) : null,
+      initiation_timestamp:
+        callData.initiation_timestamp || new Date().toISOString(),
+      speaker_data: transcriptData.utterances
+        ? JSON.stringify(transcriptData.utterances)
+        : null,
+      sentiment_analysis: transcriptData.sentiment_analysis_results
+        ? JSON.stringify(transcriptData.sentiment_analysis_results)
+        : null,
+      entities: transcriptData.entities
+        ? JSON.stringify(transcriptData.entities)
+        : null,
       disposition_title: callData.disposition_title || "",
       call_summary: transcriptData.summary || null,
       campaign_name: callData.campaign_name || null,
@@ -561,48 +689,54 @@ async function saveTranscriptionToSupabase(
       total_hold_time: callData.total_hold_time || null,
       time_in_queue: callData.time_in_queue || null,
       call_duration: JSON.stringify(callData.total_call_time) || "",
-      categories: categorization?.topic_categories 
-        ? JSON.stringify(categorization.topic_categories) 
-        : (transcriptData.topic_categorization?.all_topics ? JSON.stringify(transcriptData.topic_categorization.all_topics) : null),
-      primary_category: categorization?.primary_category || transcriptData.topic_categorization?.primary_topic || null,
+      categories: categorization?.topic_categories
+        ? JSON.stringify(categorization.topic_categories)
+        : transcriptData.topic_categorization?.all_topics
+        ? JSON.stringify(transcriptData.topic_categorization.all_topics)
+        : null,
+      primary_category:
+        categorization?.primary_category ||
+        transcriptData.topic_categorization?.primary_topic ||
+        null,
     };
 
-    console.log('Saving transcription to Supabase for contact_id:', payload.contact_id);
+    console.log(
+      "Saving transcription to Supabase for contact_id:",
+      payload.contact_id
+    );
 
     // Check if record already exists
     const { data: existingRecord, error: checkError } = await supabase
-      .from('call_records')
-      .select('contact_id')
-      .eq('contact_id', payload.contact_id)
+      .from("call_records")
+      .select("contact_id")
+      .eq("contact_id", payload.contact_id)
       .single();
 
-    if (checkError && checkError.code !== 'PGRST116') {
+    if (checkError && checkError.code !== "PGRST116") {
       throw new Error(`Error checking existing record: ${checkError.message}`);
     }
 
     if (existingRecord) {
       // Update existing record
       const { error } = await supabase
-        .from('call_records')
+        .from("call_records")
         .update(payload)
-        .eq('contact_id', payload.contact_id);
+        .eq("contact_id", payload.contact_id);
 
       if (error) {
         throw new Error(`Failed to update record: ${error.message}`);
       }
 
-      console.log('Successfully updated existing record');
+      console.log("Successfully updated existing record");
     } else {
       // Insert new record
-      const { error } = await supabase
-        .from('call_records')
-        .insert([payload]);
+      const { error } = await supabase.from("call_records").insert([payload]);
 
       if (error) {
         throw new Error(`Failed to insert record: ${error.message}`);
       }
 
-      console.log('Successfully inserted new record');
+      console.log("Successfully inserted new record");
     }
   } catch (error) {
     console.error("Error saving to Supabase:", error);
@@ -614,161 +748,177 @@ async function saveTranscriptionToSupabase(
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const startDate = searchParams.get('startDate');
-    const endDate = searchParams.get('endDate');
-    const processTranscriptions = searchParams.get('processTranscriptions') === 'true';
-    const maxProcessCount = parseInt(searchParams.get('maxProcessCount') || '5');
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const processTranscriptions =
+      searchParams.get("processTranscriptions") === "true";
+    const maxProcessCount = parseInt(
+      searchParams.get("maxProcessCount") || "5"
+    );
 
-    console.log('🚀 Starting unified call processing workflow');
+    console.log("🚀 Starting unified call processing workflow");
 
     let dateRange: DateRange | undefined;
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       const end = new Date(endDate);
-      
+
       if (isNaN(start.getTime()) || isNaN(end.getTime())) {
         return NextResponse.json(
-          { error: 'Invalid date format. Please use ISO date format.' },
+          { error: "Invalid date format. Please use ISO date format." },
           { status: 400 }
         );
       }
-      
+
       if (start > end) {
         return NextResponse.json(
-          { error: 'Start date must be before or equal to end date.' },
+          { error: "Start date must be before or equal to end date." },
           { status: 400 }
         );
       }
-      
+
       dateRange = { start, end };
     }
 
     // Step 1: Get call logs from database
-    console.log('📊 Step 1: Fetching call logs from database...');
+    console.log("📊 Step 1: Fetching call logs from database...");
     let logs = await getContactLogs(dateRange);
     console.log(`Found ${logs.length} call logs`);
 
     // Step 2: Check Supabase status
-    console.log('🔍 Step 2: Checking Supabase for existing transcriptions...');
+    console.log("🔍 Step 2: Checking Supabase for existing transcriptions...");
     logs = await enhanceCallLogsWithSupabaseStatus(logs);
-    
-    const missingTranscriptions = logs.filter(log => 
-      !log.existsInSupabase && log.recording_location
+
+    const missingTranscriptions = logs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
     );
-    console.log(`Found ${missingTranscriptions.length} calls without transcriptions`);
+    console.log(
+      `Found ${missingTranscriptions.length} calls without transcriptions`
+    );
 
     let processedCount = 0;
     const errors: any[] = [];
 
     // Step 3: Process missing transcriptions (if requested)
     if (processTranscriptions && missingTranscriptions.length > 0) {
-      console.log(`🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions...`);
-      
+      console.log(
+        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions...`
+      );
+
       const apiKey = process.env.ASSEMBLYAI_API_KEY;
       if (!apiKey) {
         return NextResponse.json(
-          { error: 'AssemblyAI API key not configured' },
+          { error: "AssemblyAI API key not configured" },
           { status: 500 }
         );
       }
 
       const logsToProcess = missingTranscriptions.slice(0, maxProcessCount);
-      
+
       for (const log of logsToProcess) {
         try {
           console.log(`\n🎯 Processing call ${log.contact_id}...`);
-          
+
           // Download audio from SFTP
-          console.log('📥 Downloading audio from SFTP...');
-          const audioBuffer = await downloadAudioFromSftp(log.recording_location);
-          
+          console.log("📥 Downloading audio from SFTP...");
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
+
           // Upload to AssemblyAI
-          console.log('⬆️ Uploading to AssemblyAI...');
+          console.log("⬆️ Uploading to AssemblyAI...");
           const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
-          
+
           // Transcribe audio
-          console.log('🎙️ Transcribing audio...');
+          console.log("🎙️ Transcribing audio...");
           const transcript = await transcribeAudio(uploadUrl, 2);
-          
+
           // Perform topic categorization
-          console.log('🏷️ Performing topic categorization...');
+          console.log("🏷️ Performing topic categorization...");
           let categorization: {
             primary_category: string;
             topic_categories: string[];
             confidence: number;
           } | null = null;
-          
+
           if (transcript.utterances && transcript.utterances.length > 0) {
             try {
               categorization = await performTopicCategorization(transcript);
             } catch (catError) {
               console.error("⚠️ Categorization failed:", catError);
             }
-            
-            transcript.topic_categorization = categorization ? {
-              primary_topic: categorization.primary_category,
-              all_topics: categorization.topic_categories,
-              confidence: categorization.confidence,
-            } : {
-              primary_topic: "Uncategorised",
-              all_topics: ["Uncategorised"],
-              confidence: 0,
-            };
+
+            transcript.topic_categorization = categorization
+              ? {
+                  primary_topic: categorization.primary_category,
+                  all_topics: categorization.topic_categories,
+                  confidence: categorization.confidence,
+                }
+              : {
+                  primary_topic: "Uncategorised",
+                  all_topics: ["Uncategorised"],
+                  confidence: 0,
+                };
           }
-          
+
           // Save to Supabase
-          console.log('💾 Saving to Supabase...');
+          console.log("💾 Saving to Supabase...");
           await saveTranscriptionToSupabase(log, transcript, categorization);
-          
+
           // Update log status
           log.existsInSupabase = true;
           processedCount++;
-          
+
           console.log(`✅ Successfully processed call ${log.contact_id}`);
-          
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           errors.push({
             contact_id: log.contact_id,
-            error: error instanceof Error ? error.message : 'Unknown error'
+            error: error instanceof Error ? error.message : "Unknown error",
           });
         }
       }
     }
 
     // Step 4: Return results
-    console.log('📋 Step 4: Preparing response...');
-    
+    console.log("📋 Step 4: Preparing response...");
+
     const summary = {
       totalCalls: logs.length,
-      existingTranscriptions: logs.filter(log => log.existsInSupabase).length,
-      missingTranscriptions: logs.filter(log => !log.existsInSupabase && log.recording_location).length,
+      existingTranscriptions: logs.filter((log) => log.existsInSupabase).length,
+      missingTranscriptions: logs.filter(
+        (log) => !log.existsInSupabase && log.recording_location
+      ).length,
       processedThisRequest: processedCount,
-      errors: errors.length
+      errors: errors.length,
     };
 
-    console.log('🎉 Unified workflow completed:', summary);
+    console.log("🎉 Unified workflow completed:", summary);
 
     return NextResponse.json({
       success: true,
       data: logs,
       summary,
       errors: errors.length > 0 ? errors : undefined,
-      dateRange: dateRange ? {
-        start: dateRange.start.toISOString(),
-        end: dateRange.end.toISOString()
-      } : null,
-      timestamp: new Date().toISOString()
+      dateRange: dateRange
+        ? {
+            start: dateRange.start.toISOString(),
+            end: dateRange.end.toISOString(),
+          }
+        : null,
+      timestamp: new Date().toISOString(),
     });
-    
   } catch (error) {
-    console.error('💥 Unified workflow error:', error);
+    console.error("💥 Unified workflow error:", error);
     return NextResponse.json(
-      { 
-        success: false, 
-        error: 'Failed to process calls',
-        details: process.env.NODE_ENV === 'development' && error instanceof Error ? error.message : undefined
+      {
+        success: false,
+        error: "Failed to process calls",
+        details:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
       },
       { status: 500 }
     );
@@ -783,28 +933,30 @@ export async function POST(request: NextRequest) {
 
     if (!contactIds || !Array.isArray(contactIds)) {
       return NextResponse.json(
-        { error: 'contactIds array is required' },
+        { error: "contactIds array is required" },
         { status: 400 }
       );
     }
 
-    console.log(`🚀 Processing specific calls: ${contactIds.join(', ')}`);
+    console.log(`🚀 Processing specific calls: ${contactIds.join(", ")}`);
 
     // Get specific call logs
     const logs = await getContactLogs();
-    const targetLogs = logs.filter(log => contactIds.includes(log.contact_id));
-    
+    const targetLogs = logs.filter((log) =>
+      contactIds.includes(log.contact_id)
+    );
+
     if (targetLogs.length === 0) {
       return NextResponse.json(
-        { error: 'No matching call logs found' },
+        { error: "No matching call logs found" },
         { status: 404 }
       );
     }
 
     // Check Supabase status
     const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(targetLogs);
-    const missingTranscriptions = enhancedLogs.filter(log => 
-      !log.existsInSupabase && log.recording_location
+    const missingTranscriptions = enhancedLogs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
     );
 
     let processedCount = 0;
@@ -814,7 +966,7 @@ export async function POST(request: NextRequest) {
       const apiKey = process.env.ASSEMBLYAI_API_KEY;
       if (!apiKey) {
         return NextResponse.json(
-          { error: 'AssemblyAI API key not configured' },
+          { error: "AssemblyAI API key not configured" },
           { status: 500 }
         );
       }
@@ -822,11 +974,13 @@ export async function POST(request: NextRequest) {
       for (const log of missingTranscriptions) {
         try {
           console.log(`🎯 Processing call ${log.contact_id}...`);
-          
-          const audioBuffer = await downloadAudioFromSftp(log.recording_location);
+
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
           const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
           const transcript = await transcribeAudio(uploadUrl, 2);
-          
+
           let categorization = null;
           if (transcript.utterances && transcript.utterances.length > 0) {
             try {
@@ -834,29 +988,30 @@ export async function POST(request: NextRequest) {
             } catch (catError) {
               console.error("Categorization failed:", catError);
             }
-            
-            transcript.topic_categorization = categorization ? {
-              primary_topic: categorization.primary_category,
-              all_topics: categorization.topic_categories,
-              confidence: categorization.confidence,
-            } : {
-              primary_topic: "Uncategorised",
-              all_topics: ["Uncategorised"],
-              confidence: 0,
-            };
+
+            transcript.topic_categorization = categorization
+              ? {
+                  primary_topic: categorization.primary_category,
+                  all_topics: categorization.topic_categories,
+                  confidence: categorization.confidence,
+                }
+              : {
+                  primary_topic: "Uncategorised",
+                  all_topics: ["Uncategorised"],
+                  confidence: 0,
+                };
           }
-          
+
           await saveTranscriptionToSupabase(log, transcript, categorization);
           log.existsInSupabase = true;
           processedCount++;
-          
+
           console.log(`✅ Successfully processed call ${log.contact_id}`);
-          
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           errors.push({
             contact_id: log.contact_id,
-            error: error instanceof Error ? error.message : 'Unknown error'
+            error: error instanceof Error ? error.message : "Unknown error",
           });
         }
       }
@@ -868,21 +1023,25 @@ export async function POST(request: NextRequest) {
       summary: {
         requestedCalls: contactIds.length,
         foundCalls: targetLogs.length,
-        existingTranscriptions: enhancedLogs.filter(log => log.existsInSupabase).length,
+        existingTranscriptions: enhancedLogs.filter(
+          (log) => log.existsInSupabase
+        ).length,
         processedThisRequest: processedCount,
-        errors: errors.length
+        errors: errors.length,
       },
       errors: errors.length > 0 ? errors : undefined,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
-
   } catch (error) {
-    console.error('Error in POST workflow:', error);
+    console.error("Error in POST workflow:", error);
     return NextResponse.json(
-      { 
-        success: false, 
-        error: 'Failed to process specific calls',
-        details: process.env.NODE_ENV === 'development' && error instanceof Error ? error.message : undefined
+      {
+        success: false,
+        error: "Failed to process specific calls",
+        details:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
       },
       { status: 500 }
     );

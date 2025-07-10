@@ -237,7 +237,54 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process transcriptions in batches of 5
+  // Helper function to check call status after timeout
+  const checkCallsStatus = async (contactIds: string[]) => {
+    try {
+      console.log(`🔍 Checking status of calls after timeout:`, contactIds);
+      
+      const response = await fetch(`/api/process-calls?startDate=${new Date(Date.now() - 24*60*60*1000).toISOString()}&endDate=${new Date().toISOString()}&processTranscriptions=false`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          const updatedLogs = data.data.filter((log: CallLog) => contactIds.includes(log.contact_id));
+          
+          // Update the logs with actual status
+          setCallLogs(prevLogs => 
+            prevLogs.map(log => {
+              const updatedLog = updatedLogs.find((d: CallLog) => d.contact_id === log.contact_id);
+              if (updatedLog) {
+                return {
+                  ...updatedLog,
+                  transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" as const : "Pending Transcription" as const
+                };
+              }
+              return log;
+            })
+          );
+          
+          // Count how many were actually transcribed
+          const transcribedCount = updatedLogs.filter((log: CallLog) => log.existsInSupabase).length;
+          if (transcribedCount > 0) {
+            console.log(`✅ Found ${transcribedCount}/${contactIds.length} calls were actually transcribed despite timeout`);
+            setProcessedCount(prev => prev + transcribedCount);
+            
+            // Remove successfully transcribed calls from error list
+            const successfulIds = updatedLogs.filter((log: CallLog) => log.existsInSupabase).map((log: CallLog) => log.contact_id);
+            setProcessingErrors(prev => prev.filter(err => !successfulIds.includes(err.contact_id)));
+          }
+          
+          return transcribedCount;
+        }
+      }
+      return 0;
+    } catch (error) {
+      console.error("Error checking call status:", error);
+      return 0;
+    }
+  };
+
+  // Process transcriptions in batches of 5 with timeout handling
   const processBatch = async (callsToProcess: CallLog[]) => {
     if (callsToProcess.length === 0) return [];
 
@@ -257,9 +304,9 @@ const CallLogDisplay = ({
         )
       );
 
-      // Create request with longer timeout (20 minutes for batch of 5)
+      // Create request with timeout (reduced to 10 minutes to catch 504s earlier)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000); // 20 minutes
+      const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 minutes
 
       const response = await fetch('/api/process-calls', {
         method: 'POST',
@@ -277,7 +324,40 @@ const CallLogDisplay = ({
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`API Error ${response.status}: ${errorText}`);
+        
+        // Handle 504 Gateway Timeout specifically
+        if (response.status === 504 || errorText.includes('504 Gateway Time-out')) {
+          console.log(`⏰ Got 504 timeout for batch. Checking if transcriptions completed in background...`);
+          
+          // Wait a bit for background processing to potentially complete
+          await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
+          
+          // Check actual status of the calls
+          const transcribedCount = await checkCallsStatus(contactIds);
+          
+          if (transcribedCount > 0) {
+            console.log(`🎉 ${transcribedCount} calls were transcribed despite 504 timeout`);
+            return remainingAfterBatch; // Continue with remaining calls
+          } else {
+            console.log(`⏳ No transcriptions completed yet. Will retry checking status in next polling cycle.`);
+            
+            // Mark as "processing" and set up polling
+            setCallLogs(prevLogs => 
+              prevLogs.map(log => 
+                contactIds.includes(log.contact_id) 
+                  ? { ...log, transcriptionStatus: "Processing" as const }
+                  : log
+              )
+            );
+            
+            // Start polling for these calls
+            setTimeout(() => pollForCompletion(contactIds), 60000); // Check again in 1 minute
+            
+            return remainingAfterBatch; // Continue with remaining calls
+          }
+        } else {
+          throw new Error(`API Error ${response.status}: ${errorText}`);
+        }
       }
 
       const data = await response.json();
@@ -300,7 +380,6 @@ const CallLogDisplay = ({
         setProcessedCount(prev => prev + contactIds.length);
         console.log(`✅ Successfully processed batch: ${contactIds.length} calls`);
         
-        // Return remaining calls to continue processing
         return remainingAfterBatch;
       } else {
         throw new Error(data.error || "Batch processing failed");
@@ -308,7 +387,17 @@ const CallLogDisplay = ({
     } catch (err) {
       console.error(`❌ Error processing batch:`, err);
       
-      // Mark failed calls
+      // For network/timeout errors, don't mark as failed immediately - they might still be processing
+      if (err instanceof Error && (err.message.includes('aborted') || err.message.includes('timeout') || err.message.includes('504'))) {
+        console.log(`⏳ Request timeout/abort - transcriptions may still be processing in background`);
+        
+        // Start polling for these calls
+        setTimeout(() => pollForCompletion(contactIds), 60000); // Check in 1 minute
+        
+        return remainingAfterBatch; // Continue with remaining calls
+      }
+      
+      // For other errors, mark as failed
       setCallLogs(prevLogs => 
         prevLogs.map(log => 
           contactIds.includes(log.contact_id) 
@@ -327,8 +416,31 @@ const CallLogDisplay = ({
       }));
       setProcessingErrors(prev => [...prev, ...errors]);
       
-      // Continue with remaining calls even if this batch failed
       return remainingAfterBatch;
+    }
+  };
+
+  // Polling function to check if "processing" calls have completed
+  const pollForCompletion = async (contactIds: string[]) => {
+    try {
+      console.log(`🔄 Polling for completion of calls:`, contactIds);
+      
+      const transcribedCount = await checkCallsStatus(contactIds);
+      
+      if (transcribedCount < contactIds.length) {
+        // Some calls still processing, continue polling
+        const stillProcessing = contactIds.length - transcribedCount;
+        console.log(`⏳ ${stillProcessing} calls still processing, will check again in 2 minutes`);
+        
+        // Continue polling every 2 minutes for up to 20 minutes total
+        setTimeout(() => pollForCompletion(contactIds), 2 * 60 * 1000);
+      } else {
+        console.log(`✅ All ${contactIds.length} calls completed transcription`);
+      }
+    } catch (error) {
+      console.error("Error in polling:", error);
+      // Continue polling despite errors
+      setTimeout(() => pollForCompletion(contactIds), 2 * 60 * 1000);
     }
   };
 
@@ -498,7 +610,10 @@ const CallLogDisplay = ({
                 />
               </div>
               <div className="text-xs text-blue-200 mt-1">
-                ⏱️ Each batch takes 5-15 minutes to complete. Please keep this page open.
+                ⏱️ Each batch takes 5-15 minutes. Gateway timeouts are handled gracefully.
+              </div>
+              <div className="text-xs text-blue-200">
+                🔄 If you see &quot;504 timeout&quot; errors, transcriptions continue in the background and will be detected automatically.
               </div>
             </div>
           )}

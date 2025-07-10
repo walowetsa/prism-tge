@@ -8,23 +8,10 @@ const openai = new OpenAI({
 
 // TODO: Update Categories - Mycar Appropriate
 const TOPIC_CATEGORIES = [
-  "Tyre Sale / Purchase Inquiry",
-  "Tyre Installation & Fitting",
-  "Tyre Inspection",
-  "Tyre Alignment / Balancing",
-  "Out of Stock / Unavailable Tyres",
-  "Mechanical Repairs & Servicing",
-  "Pre-Purchase Vehicle Inspection",
-  "Pink Slips (Vehicle Inspection)",
-  "Roadside Assistance",
-  "Non-Servicable Areas (MTF/PPI)",
-  "Booking Cancellations & Rescheduling",
-  "No Same-Day Bookings / No Availability",
-  "Unable to Contact Store",
-  "Price Objection / Dispute",
-  "Promotion & Special Offers",
-  "TCP (Terms and Conditions Policy)",
-  "Other"
+  "No Lead - Call Refused",
+  "Lead Generated - New Business",
+  "No Lead - No Product Service Match",
+  "Other",
 ];
 
 export async function POST(request: Request) {
@@ -92,9 +79,9 @@ export async function POST(request: Request) {
           Respond with ONLY the category names separated by "||". Include ONLY 1-3 categories based on relevance - if only one topic is clearly relevant, return just that one.
           
           Example responses:
-          "Technical Support||Product Information"
-          "Billing Issues" 
-          "Complaints||Technical Support||Billing Issues"
+          "No Lead - Call Refused"
+          "No Lead - No Product Service Match" 
+          "Other"
           
           Here is the call transcript:
           ${formattedTranscript}`,

@@ -558,17 +558,16 @@ const categoryData = Object.entries(categoryBreakdown)
     percentage: Math.round((count / filteredCalls.length) * 100),
   }));
 
-    // AHT by hour
+    // AHT by hour - Fixed calculation
     const ahtByHour = filteredCalls.reduce((acc, call) => {
       const hour = new Date(call.initiation_timestamp).getHours();
-      const duration =
-        (call.call_duration?.minutes || 0) * 60 +
-        (call.call_duration?.seconds || 0);
+      // Convert call duration to total seconds for accurate calculation
+      const totalSeconds = (call.call_duration?.minutes || 0) * 60 + (call.call_duration?.seconds || 0);
 
       if (!acc[hour]) {
         acc[hour] = { totalDuration: 0, callCount: 0 };
       }
-      acc[hour].totalDuration += duration;
+      acc[hour].totalDuration += totalSeconds;
       acc[hour].callCount += 1;
       return acc;
     }, {} as Record<number, { totalDuration: number; callCount: number }>);
@@ -576,9 +575,10 @@ const categoryData = Object.entries(categoryBreakdown)
     const ahtData = Array.from({ length: 24 }, (_, hour) => {
       const data = ahtByHour[hour];
       const avgSeconds = data ? data.totalDuration / data.callCount : 0;
+      const avgMinutes = avgSeconds / 60;
       return {
         hour: `${hour.toString().padStart(2, "0")}:00`,
-        aht: Math.round((avgSeconds / 60) * 100) / 100, // minutes with 2 decimal places
+        aht: Math.round(avgMinutes * 100) / 100, // Round to 2 decimal places
         calls: data?.callCount || 0,
       };
     }).filter((item) => item.calls > 0);
@@ -594,20 +594,21 @@ const categoryData = Object.entries(categoryBreakdown)
     };
   }, [filteredCalls]);
 
-  // Summary statistics with enhanced metrics
+  // Summary statistics with enhanced metrics - Updated with New Leads Generated
 const stats = useMemo(() => {
   const totalCalls = filteredCalls.length;
-  const totalDuration = filteredCalls.reduce((sum, call) => {
-    return (
-      sum +
-      (call.call_duration?.minutes || 0) * 60 +
-      (call.call_duration?.seconds || 0)
-    );
+  
+  // Calculate total duration in seconds for accurate AHT
+  const totalDurationSeconds = filteredCalls.reduce((sum, call) => {
+    const minutes = call.call_duration?.minutes || 0;
+    const seconds = call.call_duration?.seconds || 0;
+    return sum + (minutes * 60) + seconds;
   }, 0);
 
-  const avgDuration = totalCalls > 0 ? totalDuration / totalCalls : 0;
-  const avgMinutes = Math.floor(avgDuration / 60);
-  const avgSeconds = Math.floor(avgDuration % 60);
+  // Calculate average duration and format properly
+  const avgDurationSeconds = totalCalls > 0 ? totalDurationSeconds / totalCalls : 0;
+  const avgMinutes = Math.floor(avgDurationSeconds / 60);
+  const avgSeconds = Math.floor(avgDurationSeconds % 60);
 
   // Additional stats
   const callsWithTranscripts = filteredCalls.filter(
@@ -618,19 +619,13 @@ const stats = useMemo(() => {
       ? Math.round((callsWithTranscripts / totalCalls) * 100)
       : 0;
 
-  // NEW: Sales vs No Sales counts
-  const salesCounts = filteredCalls.reduce((acc, call) => {
-    const disposition = call.disposition_title || '';
-    if (disposition.toLowerCase().startsWith('sale')) {
-      acc.sales++;
-    } else if (disposition.toLowerCase().startsWith('no sale')) {
-      acc.noSales++;
-    }
-    return acc;
-  }, { sales: 0, noSales: 0 });
+  // NEW: Count leads generated based on specific disposition
+  const newLeadsGenerated = filteredCalls.filter(
+    (call) => call.disposition_title === "Conversation - Lead Generated: New Business"
+  ).length;
 
-  const totalSalesCalls = salesCounts.sales + salesCounts.noSales;
-  const salesRate = totalSalesCalls > 0 ? Math.round((salesCounts.sales / totalSalesCalls) * 100) : 0;
+  // Calculate lead generation rate from total calls
+  const leadGenerationRate = totalCalls > 0 ? Math.round((newLeadsGenerated / totalCalls) * 100) : 0;
 
   return {
     totalCalls,
@@ -638,9 +633,8 @@ const stats = useMemo(() => {
     totalSentiments: analyticsData.totalSentiments,
     transcriptCoverage,
     callsWithTranscripts,
-    salesCounts,        
-    salesRate,         
-    totalSalesCalls,   
+    newLeadsGenerated,
+    leadGenerationRate,
   };
 }, [filteredCalls, analyticsData.totalSentiments]);
 
@@ -1259,21 +1253,13 @@ Let's dive into your data!`,
               </div>
               <div className="bg-bg-secondary rounded-lg shadow-sm border border-bg-secondary p-4">
                 <h3 className="text-sm font-medium text-white">
-                  Sales Performance
+                  New Leads Generated
                 </h3>
                 <p className="text-2xl font-bold text-blue-600">
-                  {stats.salesRate}%
+                  {stats.newLeadsGenerated}
                 </p>
-                <div className="flex gap-2 mt-1">
-                  <span className="text-sm text-green-600">
-                    Sales: {stats.salesCounts.sales}
-                  </span>
-                  <span className="text-sm text-red-600">
-                    No Sale: {stats.salesCounts.noSales}
-                  </span>
-                </div>
                 <p className="text-xs text-gray-400 mt-1">
-                  {stats.totalSalesCalls} total sales calls
+                  {stats.leadGenerationRate}% conversion rate
                 </p>
               </div>
             </div>

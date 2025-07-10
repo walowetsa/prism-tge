@@ -241,7 +241,7 @@ const CallLogDisplay = ({
     if (callsToProcess.length === 0) return [];
 
     // Process one call at a time to avoid overwhelming the server
-    const callToProcess = callsToProcess[0];
+    const callToProcess = callsToProcess[2];
     const remainingAfterBatch = callsToProcess.slice(1);
     const contactId = callToProcess.contact_id;
     

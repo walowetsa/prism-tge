@@ -129,7 +129,9 @@ const CallLogDisplay = ({
   const fetchSupabaseRecords = async () => {
     setLoadingSupabase(true);
     try {
-      console.log('📊 Fetching all transcribed calls from Supabase...');
+      const timestamp = new Date().toISOString();
+      console.log(`📊 [${timestamp}] Fetching all transcribed calls from Supabase...`);
+      console.log('⚠️ This should only happen ONCE on initial load or manual refresh');
       
       const response = await fetch('/api/supabase/get-all-transcriptions');
       const data = await response.json();
@@ -137,7 +139,7 @@ const CallLogDisplay = ({
       if (data.success) {
         setSupabaseRecords(data.data || []);
         setLastSupabaseUpdate(new Date().toISOString());
-        console.log(`✅ Loaded ${data.data?.length || 0} transcribed calls from Supabase`);
+        console.log(`✅ [${timestamp}] Loaded ${data.data?.length || 0} transcribed calls from Supabase`);
       } else {
         console.error('Failed to fetch Supabase records:', data.error);
       }
@@ -392,8 +394,8 @@ const CallLogDisplay = ({
           console.log(`📊 Total exclusion list size: ${processedContactIds.current.size}`);
         }
 
-        // Refresh Supabase data
-        await fetchSupabaseRecords();
+        // CRITICAL FIX: Do NOT refresh Supabase data - only use API response data
+        console.log('✅ Skipping Supabase refresh - using API response data only');
 
         // Handle processing errors
         if (data.errors && data.errors.length > 0) {
@@ -550,6 +552,7 @@ const CallLogDisplay = ({
 
       console.log(`\n🎉 === AUTO-PROCESSING COMPLETED ===`);
       console.log(`📊 Total unique calls processed: ${totalProcessed}`);
+      console.log(`🚫 Supabase will NOT be fetched again - only checked once on initial load`);
       
       processedContactIds.current.clear();
       currentBatchNumber.current = 0;
@@ -604,7 +607,7 @@ const CallLogDisplay = ({
       });
 
       try {
-        console.log('🔍 Step 1: Fetching Supabase transcriptions...');
+        console.log('🔍 Step 1: Fetching Supabase transcriptions (ONLY ON INITIAL LOAD)...');
         await fetchSupabaseRecords();
 
         console.log('📊 Step 2: Fetching call logs from database...');
@@ -620,7 +623,7 @@ const CallLogDisplay = ({
         if (data.success) {
           setCallLogs(data.data || []);
           console.log('📋 Call logs loaded:', data.summary);
-          console.log('🚫 Real-time updates DISABLED - no more repeated checking every 10 seconds');
+          console.log('🚫 Supabase will NOT be checked again automatically');
 
           const missing = data.summary.missingTranscriptions;
           const shouldStartAutoProcessing = (
@@ -713,7 +716,7 @@ const CallLogDisplay = ({
           {/* Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              📊 Auto-processing will check for missing transcriptions and process them automatically
+              📊 Supabase checked ONLY on initial load - no repeated background checking
               {isAutoProcessingRunning.current && (
                 <span className="ml-2 text-yellow-400">(Currently auto-processing)</span>
               )}
@@ -743,7 +746,7 @@ const CallLogDisplay = ({
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 8-second delays (no repeated checking - processes different calls each batch)
+                  Processing {BATCH_SIZE} calls per batch with 8-second delays (Supabase checked only once on initial load)
                 </div>
               </div>
             </div>
@@ -765,13 +768,16 @@ const CallLogDisplay = ({
             {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
               <div className="mt-3 flex items-center gap-2">
                 <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions (no more repeated checking!)
+                  🤖 Auto-processing will start automatically for missing transcriptions (Supabase checked only once on load)
                 </div>
                 <button
-                  onClick={() => fetchSupabaseRecords()}
+                  onClick={() => {
+                    console.log('🔄 Manual Supabase refresh requested by user');
+                    fetchSupabaseRecords();
+                  }}
                   className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
                 >
-                  🔄 Manual Refresh
+                  🔄 Manual Supabase Refresh
                 </button>
               </div>
             )}
@@ -837,7 +843,7 @@ const CallLogDisplay = ({
             <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
               <div className="text-yellow-200">
                 {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (no repeated checking - processing different calls each batch, ${processedContactIds.current.size} excluded)...` 
+                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (Supabase checked only once - no repeated checking, ${processedContactIds.current.size} excluded)...` 
                   : '🚀 Processing transcriptions...'
                 }
               </div>

@@ -41,6 +41,7 @@ type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' |
 type SortDirection = 'asc' | 'desc';
 
 const ITEMS_PER_PAGE = 100;
+const BATCH_SIZE = 5;
 
 const CallLogDisplay = ({
   selectedDateRange,
@@ -236,30 +237,29 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process transcriptions in batches (one at a time for stability)
+  // Process transcriptions in batches of 5
   const processBatch = async (callsToProcess: CallLog[]) => {
     if (callsToProcess.length === 0) return [];
 
-    // Process one call at a time to avoid overwhelming the server
-    const callToProcess = callsToProcess[2];
-    const remainingAfterBatch = callsToProcess.slice(1);
-    const contactId = callToProcess.contact_id;
+    const batchToProcess = callsToProcess.slice(0, BATCH_SIZE);
+    const remainingAfterBatch = callsToProcess.slice(BATCH_SIZE);
+    const contactIds = batchToProcess.map(call => call.contact_id);
     
     try {
-      console.log(`🚀 Processing call ${contactId} (${remainingAfterBatch.length} remaining)`);
+      console.log(`🚀 Processing batch of ${contactIds.length} calls (${remainingAfterBatch.length} remaining):`, contactIds);
 
-      // Mark call as processing
+      // Mark calls as processing
       setCallLogs(prevLogs => 
         prevLogs.map(log => 
-          log.contact_id === contactId 
+          contactIds.includes(log.contact_id) 
             ? { ...log, transcriptionStatus: "Processing" as const }
             : log
         )
       );
 
-      // Create request with longer timeout (15 minutes for transcription)
+      // Create request with longer timeout (20 minutes for batch of 5)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15 * 60 * 1000); // 15 minutes
+      const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000); // 20 minutes
 
       const response = await fetch('/api/process-calls', {
         method: 'POST',
@@ -267,7 +267,7 @@ const CallLogDisplay = ({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          contactIds: [contactId],
+          contactIds,
           processTranscriptions: true
         }),
         signal: controller.signal
@@ -283,37 +283,35 @@ const CallLogDisplay = ({
       const data = await response.json();
 
       if (data.success) {
-        // Update processed call
+        // Update processed calls
         setCallLogs(prevLogs => 
           prevLogs.map(log => {
-            if (log.contact_id === contactId) {
-              const updatedLog = data.data.find((d: CallLog) => d.contact_id === contactId);
-              if (updatedLog) {
-                return {
-                  ...updatedLog,
-                  transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" as const : "Failed" as const
-                };
-              }
+            const updatedLog = data.data.find((d: CallLog) => d.contact_id === log.contact_id);
+            if (updatedLog) {
+              return {
+                ...updatedLog,
+                transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" as const : "Failed" as const
+              };
             }
             return log;
           })
         );
 
-        setProcessedCount(prev => prev + 1);
-        console.log(`✅ Successfully processed call ${contactId}`);
+        setProcessedCount(prev => prev + contactIds.length);
+        console.log(`✅ Successfully processed batch: ${contactIds.length} calls`);
         
         // Return remaining calls to continue processing
         return remainingAfterBatch;
       } else {
-        throw new Error(data.error || "Processing failed");
+        throw new Error(data.error || "Batch processing failed");
       }
     } catch (err) {
-      console.error(`❌ Error processing call ${contactId}:`, err);
+      console.error(`❌ Error processing batch:`, err);
       
-      // Mark failed call
+      // Mark failed calls
       setCallLogs(prevLogs => 
         prevLogs.map(log => 
-          log.contact_id === contactId 
+          contactIds.includes(log.contact_id) 
             ? { 
                 ...log, 
                 transcriptionStatus: "Failed" as const, 
@@ -323,18 +321,18 @@ const CallLogDisplay = ({
         )
       );
       
-      const error = {
-        contact_id: contactId,
+      const errors = contactIds.map(id => ({
+        contact_id: id,
         error: err instanceof Error ? err.message : "Unknown error"
-      };
-      setProcessingErrors(prev => [...prev, error]);
+      }));
+      setProcessingErrors(prev => [...prev, ...errors]);
       
-      // Continue with remaining calls even if this one failed
+      // Continue with remaining calls even if this batch failed
       return remainingAfterBatch;
     }
   };
 
-  // Auto-process all missing transcriptions (one at a time for stability)
+  // Auto-process all missing transcriptions in batches of 5
   const autoProcessTranscriptions = useCallback(async (logs: CallLog[]) => {
     if (processingRef.current) return;
     
@@ -353,20 +351,21 @@ const CallLogDisplay = ({
     setProcessedCount(0);
     setTotalToProcess(callsNeedingTranscription.length);
 
-    console.log(`🎯 Starting auto-processing of ${callsNeedingTranscription.length} calls (one at a time for stability)`);
+    console.log(`🎯 Starting auto-processing of ${callsNeedingTranscription.length} calls in batches of ${BATCH_SIZE}`);
 
     let remainingCalls = [...callsNeedingTranscription];
-    let callNumber = 1;
+    let batchNumber = 1;
 
     while (remainingCalls.length > 0 && processingRef.current) {
-      console.log(`📞 Processing call ${callNumber}/${callsNeedingTranscription.length}: ${remainingCalls[0].contact_id}`);
+      const currentBatchSize = Math.min(remainingCalls.length, BATCH_SIZE);
+      console.log(`📦 Processing batch ${batchNumber} (${currentBatchSize} calls): ${remainingCalls.length} remaining`);
       
       remainingCalls = await processBatch(remainingCalls);
-      callNumber++;
+      batchNumber++;
       
-      // Small delay between calls to avoid overwhelming the server
+      // Delay between batches to avoid overwhelming the server
       if (remainingCalls.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+        await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay between batches
       }
     }
 
@@ -476,7 +475,7 @@ const CallLogDisplay = ({
             <div className="mb-4 p-3 bg-blue-900 border border-blue-600 rounded-lg">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-sm text-blue-300 font-medium">
-                  🚀 Auto-Processing Transcriptions (Sequential Processing)
+                  🚀 Auto-Processing Transcriptions (Batches of {BATCH_SIZE})
                 </div>
                 <button
                   onClick={() => {
@@ -490,7 +489,7 @@ const CallLogDisplay = ({
                 </button>
               </div>
               <div className="text-xs text-blue-200">
-                Processing calls one at a time for stability... ({processedCount}/{totalToProcess} completed)
+                Processing {BATCH_SIZE} calls at a time... ({processedCount}/{totalToProcess} completed)
               </div>
               <div className="w-full bg-blue-800 rounded-full h-2 mt-2">
                 <div 
@@ -499,7 +498,7 @@ const CallLogDisplay = ({
                 />
               </div>
               <div className="text-xs text-blue-200 mt-1">
-                ⏱️ Each call takes 2-10 minutes to transcribe. Please keep this page open.
+                ⏱️ Each batch takes 5-15 minutes to complete. Please keep this page open.
               </div>
             </div>
           )}

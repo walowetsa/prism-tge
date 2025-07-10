@@ -765,13 +765,20 @@ async function saveTranscriptionToSupabase(
   }
 }
 
-// NEW: Function to get fresh missing transcriptions right before processing
+// NEW: In-memory tracking for processing calls to prevent duplicates
+const processingCalls = new Set<string>();
+const attemptedCalls = new Map<string, number>(); // contact_id -> attempt count
+const MAX_ATTEMPTS = 3;
+
+// NEW: Function to get fresh missing transcriptions with exclusions
 async function getFreshMissingTranscriptions(
   dateRange?: DateRange,
-  maxCount?: number
+  maxCount?: number,
+  excludeContactIds: string[] = []
 ): Promise<CallLog[]> {
   try {
     console.log("🔄 Getting fresh list of missing transcriptions...");
+    console.log(`📋 Excluding ${excludeContactIds.length} contact IDs:`, excludeContactIds.slice(0, 5));
     
     // Get call logs from database
     const logs = await getContactLogs(dateRange);
@@ -779,12 +786,17 @@ async function getFreshMissingTranscriptions(
     // Check current Supabase status
     const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(logs);
     
-    // Filter for missing transcriptions
+    // Filter for missing transcriptions with exclusions
     const missingTranscriptions = enhancedLogs.filter(
-      (log) => !log.existsInSupabase && log.recording_location
+      (log) => 
+        !log.existsInSupabase && 
+        log.recording_location &&
+        !excludeContactIds.includes(log.contact_id) &&
+        !processingCalls.has(log.contact_id) &&
+        (attemptedCalls.get(log.contact_id) || 0) < MAX_ATTEMPTS
     );
 
-    console.log(`Found ${missingTranscriptions.length} fresh missing transcriptions`);
+    console.log(`Found ${missingTranscriptions.length} fresh missing transcriptions (after exclusions)`);
 
     // Return limited set if maxCount specified
     return maxCount 
@@ -794,6 +806,33 @@ async function getFreshMissingTranscriptions(
     console.error("Error getting fresh missing transcriptions:", error);
     return [];
   }
+}
+
+// NEW: Function to mark call as being processed
+function markCallAsProcessing(contactId: string) {
+  processingCalls.add(contactId);
+  console.log(`🔒 Marked ${contactId} as processing`);
+}
+
+// NEW: Function to unmark call as being processed
+function unmarkCallAsProcessing(contactId: string, success: boolean = false) {
+  processingCalls.delete(contactId);
+  
+  if (!success) {
+    const attempts = (attemptedCalls.get(contactId) || 0) + 1;
+    attemptedCalls.set(contactId, attempts);
+    console.log(`❌ Unmarked ${contactId} as processing (attempt ${attempts}/${MAX_ATTEMPTS})`);
+  } else {
+    attemptedCalls.delete(contactId);
+    console.log(`✅ Unmarked ${contactId} as processing (success)`);
+  }
+}
+
+// NEW: Function to clear processing state (for cleanup)
+function clearProcessingState() {
+  processingCalls.clear();
+  attemptedCalls.clear();
+  console.log("🧹 Cleared all processing state");
 }
 
 // Main API handler
@@ -807,8 +846,16 @@ export async function GET(request: NextRequest) {
     const maxProcessCount = parseInt(
       searchParams.get("maxProcessCount") || "3"
     );
+    // NEW: Get excluded contact IDs from query params
+    const excludeContactIdsParam = searchParams.get("excludeContactIds");
+    const excludeContactIds = excludeContactIdsParam 
+      ? excludeContactIdsParam.split(',').filter(id => id.trim() !== '')
+      : [];
 
     console.log("🚀 Starting unified call processing workflow");
+    if (excludeContactIds.length > 0) {
+      console.log(`📋 Excluding ${excludeContactIds.length} contact IDs from processing`);
+    }
 
     let dateRange: DateRange | undefined;
 
@@ -851,6 +898,7 @@ export async function GET(request: NextRequest) {
 
     let processedCount = 0;
     const errors: any[] = [];
+    const processedContactIds: string[] = []; // NEW: Track which calls we've processed
 
     // Step 3: Process missing transcriptions (if requested)
     if (processTranscriptions && missingTranscriptions.length > 0) {
@@ -866,10 +914,11 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      // FIXED: Get fresh missing transcriptions right before processing
+      // FIXED: Get fresh missing transcriptions with exclusions
       const freshMissingTranscriptions = await getFreshMissingTranscriptions(
         dateRange,
-        maxProcessCount
+        maxProcessCount,
+        [...processedContactIds, ...excludeContactIds] // Combine local processed + excluded from client
       );
 
       console.log(`🎯 Processing ${freshMissingTranscriptions.length} fresh missing transcriptions`);
@@ -884,6 +933,9 @@ export async function GET(request: NextRequest) {
             console.log(`⏭️ Call ${log.contact_id} already processed by another batch, skipping...`);
             continue;
           }
+
+          // NEW: Mark call as being processed
+          markCallAsProcessing(log.contact_id);
 
           console.log(`🎯 Processing call ${log.contact_id}...`);
 
@@ -934,6 +986,7 @@ export async function GET(request: NextRequest) {
           const finalCheck = await checkCallExistsInSupabase(log.contact_id);
           if (finalCheck) {
             console.log(`⚠️ Call ${log.contact_id} was processed by another batch during processing, skipping save...`);
+            unmarkCallAsProcessing(log.contact_id, false);
             continue;
           }
 
@@ -944,10 +997,18 @@ export async function GET(request: NextRequest) {
           // Update log status
           log.existsInSupabase = true;
           processedCount++;
+          processedContactIds.push(log.contact_id); // NEW: Track this as processed
+
+          // NEW: Mark as successfully processed
+          unmarkCallAsProcessing(log.contact_id, true);
 
           console.log(`✅ Successfully processed call ${log.contact_id}`);
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
+          
+          // NEW: Unmark as processing on error
+          unmarkCallAsProcessing(log.contact_id, false);
+          
           errors.push({
             contact_id: log.contact_id,
             error: error instanceof Error ? error.message : "Unknown error",
@@ -972,10 +1033,14 @@ export async function GET(request: NextRequest) {
 
     console.log("🎉 Unified workflow completed:", summary);
 
+    // NEW: Clear processing state on completion
+    clearProcessingState();
+
     return NextResponse.json({
       success: true,
       data: finalLogs,
       summary,
+      processedContactIds, // NEW: Return processed contact IDs for frontend tracking
       errors: errors.length > 0 ? errors : undefined,
       dateRange: dateRange
         ? {
@@ -987,6 +1052,10 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("💥 Unified workflow error:", error);
+    
+    // NEW: Clear processing state on error
+    clearProcessingState();
+    
     return NextResponse.json(
       {
         success: false,
@@ -1058,6 +1127,9 @@ export async function POST(request: NextRequest) {
             continue;
           }
 
+          // NEW: Mark call as being processed
+          markCallAsProcessing(log.contact_id);
+
           console.log(`🎯 Processing call ${log.contact_id}...`);
 
           const audioBuffer = await downloadAudioFromSftp(
@@ -1091,6 +1163,7 @@ export async function POST(request: NextRequest) {
           const finalCheck = await checkCallExistsInSupabase(log.contact_id);
           if (finalCheck) {
             console.log(`⚠️ Call ${log.contact_id} was processed during processing, skipping save...`);
+            unmarkCallAsProcessing(log.contact_id, false);
             continue;
           }
 
@@ -1098,9 +1171,16 @@ export async function POST(request: NextRequest) {
           log.existsInSupabase = true;
           processedCount++;
 
+          // NEW: Mark as successfully processed
+          unmarkCallAsProcessing(log.contact_id, true);
+
           console.log(`✅ Successfully processed call ${log.contact_id}`);
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
+          
+          // NEW: Unmark as processing on error
+          unmarkCallAsProcessing(log.contact_id, false);
+          
           errors.push({
             contact_id: log.contact_id,
             error: error instanceof Error ? error.message : "Unknown error",
@@ -1111,6 +1191,9 @@ export async function POST(request: NextRequest) {
 
     // Get final status
     const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
+
+    // NEW: Clear processing state on completion
+    clearProcessingState();
 
     return NextResponse.json({
       success: true,
@@ -1129,6 +1212,10 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error in POST workflow:", error);
+    
+    // NEW: Clear processing state on error
+    clearProcessingState();
+    
     return NextResponse.json(
       {
         success: false,

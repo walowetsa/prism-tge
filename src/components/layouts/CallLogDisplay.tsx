@@ -1,12 +1,53 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import Link from "next/link";
+// app/api/process-calls/route.ts - Unified call processing workflow with duplicate prevention
 
+import { NextRequest, NextResponse } from "next/server";
+import { Pool } from "pg";
+import { createClient } from "@supabase/supabase-js";
+import { Client } from "ssh2";
+import { readFileSync } from "fs";
+import * as path from "path";
+
+// Database configuration
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: 5432,
+  user: process.env.DB_USER,
+  password: `Y2QyNzk5ZjRiMDZmYTYwMDI2NWE1NzhmODUwNjY2`,
+  database: process.env.DB_NAME,
+});
+
+// Supabase configuration
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+// SFTP configuration
+type SftpConfig = {
+  host: string;
+  port: number;
+  username: string;
+  privateKey: Buffer;
+  passphrase: string;
+};
+
+function getSftpConfig(): SftpConfig {
+  return {
+    host: process.env.SFTP_HOST!,
+    port: parseInt(process.env.SFTP_PORT!),
+    username: process.env.SFTP_USERNAME!,
+    privateKey: readFileSync(
+      path.resolve(process.env.HOME || "~", ".ssh/sftp_key")
+    ),
+    passphrase: process.env.SFTP_PASSPHRASE!,
+  };
+}
+
+// Interfaces
 interface DateRange {
   start: Date;
   end: Date;
-  label: string;
 }
 
 interface CallLog {
@@ -27,932 +68,1164 @@ interface CallLog {
   queue_name: string;
   disposition_title: string;
   existsInSupabase?: boolean;
-  transcriptionStatus?: "Transcribed" | "Pending Transcription" | "Failed" | "Processing";
-  transcriptionProgress?: number;
-  transcriptionError?: string;
-  // Supabase fields for transcribed calls
-  transcript_text?: string;
-  call_summary?: string;
-  sentiment_analysis?: string;
-  primary_category?: string;
-  categories?: string;
-  created_at?: string;
-  updated_at?: string;
 }
 
-interface ProcessingSummary {
-  totalCalls: number;
-  existingTranscriptions: number;
-  missingTranscriptions: number;
-  processedThisRequest: number;
-  errors: number;
-}
-
-interface ProcessingError {
+interface TranscriptionData {
   contact_id: string;
-  error: string;
-}
-
-interface AutoProcessingState {
-  isRunning: boolean;
-  currentBatch: number;
-  totalBatches: number;
-  processed: number;
-  failed: number;
-  remaining: number;
-}
-
-interface SupabaseCallRecord {
-  contact_id: string;
-  agent_username: string;
+  recording_location: string;
   transcript_text: string;
-  call_summary?: string;
-  sentiment_analysis?: string;
-  primary_category?: string;
-  categories?: string;
   queue_name?: string;
-  disposition_title?: string;
-  recording_location?: string;
+  agent_username: string;
   initiation_timestamp: string;
-  call_duration?: any;
-  created_at: string;
-  updated_at: string;
+  speaker_data?: string | null;
+  sentiment_analysis?: string | null;
+  entities?: string | null;
+  categories?: string | null;
+  disposition_title?: string;
+  call_summary?: string | null;
+  campaign_name?: string | null;
+  campaign_id?: string | null;
+  customer_cli?: string | null;
+  agent_hold_time?: number | null;
+  total_hold_time?: number | null;
+  time_in_queue?: number | null;
+  call_duration: string;
+  primary_category?: string | null;
 }
 
-type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
-type SortDirection = 'asc' | 'desc';
+// Helper function to get contact logs from database
+async function getContactLogs(dateRange?: DateRange) {
+  try {
+    let query: string;
+    let params: any[] = [];
 
-const ITEMS_PER_PAGE = 100;
-const BATCH_SIZE = 5;
-const REALTIME_UPDATE_INTERVAL = 10000; // 10 seconds
-
-const CallLogDisplay = ({
-  selectedDateRange,
-  checkSupabase = true,
-}: {
-  selectedDateRange: DateRange | null;
-  checkSupabase?: boolean;
-}) => {
-  const [callLogs, setCallLogs] = useState<CallLog[]>([]);
-  const [supabaseRecords, setSupabaseRecords] = useState<SupabaseCallRecord[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadingSupabase, setLoadingSupabase] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [processing, setProcessing] = useState(false);
-  const [processingSummary, setProcessingSummary] = useState<ProcessingSummary | null>(null);
-  const [processingErrors, setProcessingErrors] = useState<ProcessingError[]>([]);
-  const [autoProcessing, setAutoProcessing] = useState<AutoProcessingState>({
-    isRunning: false,
-    currentBatch: 0,
-    totalBatches: 0,
-    processed: 0,
-    failed: 0,
-    remaining: 0
-  });
-  const [lastSupabaseUpdate, setLastSupabaseUpdate] = useState<string | null>(null);
-  
-  const [selectedAgent, setSelectedAgent] = useState<string>("all");
-  const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
-
-  // Refs for tracking and cleanup
-  const autoProcessingInitiated = useRef<string | null>(null);
-  const realtimeInterval = useRef<NodeJS.Timeout | null>(null);
-  // FIXED: Add ref to prevent concurrent auto-processing
-  const isAutoProcessingRunning = useRef<boolean>(false);
-
-  // Fetch all transcribed calls from Supabase
-  const fetchSupabaseRecords = async () => {
-    setLoadingSupabase(true);
-    try {
-      console.log('📊 Fetching all transcribed calls from Supabase...');
-      
-      const response = await fetch('/api/supabase/get-all-transcriptions');
-      const data = await response.json();
-
-      if (data.success) {
-        setSupabaseRecords(data.data || []);
-        setLastSupabaseUpdate(new Date().toISOString());
-        console.log(`✅ Loaded ${data.data?.length || 0} transcribed calls from Supabase`);
-      } else {
-        console.error('Failed to fetch Supabase records:', data.error);
-      }
-    } catch (err) {
-      console.error('Error fetching Supabase records:', err);
-    } finally {
-      setLoadingSupabase(false);
-    }
-  };
-
-  // Merge call logs with Supabase records
-  const mergedCallLogs = useMemo(() => {
-    if (callLogs.length === 0) return [];
-
-    const supabaseMap = new Map(supabaseRecords.map(record => [record.contact_id, record]));
-    
-    return callLogs.map(log => {
-      const supabaseRecord = supabaseMap.get(log.contact_id);
-      
-      if (supabaseRecord) {
-        // Merge with Supabase data
-        return {
-          ...log,
-          existsInSupabase: true,
-          transcriptionStatus: "Transcribed" as const,
-          transcript_text: supabaseRecord.transcript_text,
-          call_summary: supabaseRecord.call_summary,
-          sentiment_analysis: supabaseRecord.sentiment_analysis,
-          primary_category: supabaseRecord.primary_category,
-          categories: supabaseRecord.categories,
-          created_at: supabaseRecord.created_at,
-          updated_at: supabaseRecord.updated_at,
-        };
-      } else {
-        // Call log without transcription
-        return {
-          ...log,
-          existsInSupabase: false,
-          transcriptionStatus: "Pending Transcription" as const,
-        };
-      }
-    });
-  }, [callLogs, supabaseRecords]);
-
-  // Get unique agents from merged data
-  const uniqueAgents = useMemo(() => {
-    const agents = Array.from(new Set(mergedCallLogs.map(log => log.agent_username)))
-      .filter(agent => agent && agent.trim() !== "")
-      .sort();
-    return agents;
-  }, [mergedCallLogs]);
-
-  // Filter and sort merged call logs
-  const filteredAndSortedCallLogs = useMemo(() => {
-    let filtered = mergedCallLogs;
-    
-    if (selectedAgent !== "all") {
-      filtered = mergedCallLogs.filter(log => log.agent_username === selectedAgent);
-    }
-    
-    return filtered.sort((a, b) => {
-      let aValue: any, bValue: any;
-      
-      switch (sortField) {
-        case 'agent_username':
-          aValue = a.agent_username || '';
-          bValue = b.agent_username || '';
-          break;
-        case 'initiation_timestamp':
-          aValue = new Date(a.initiation_timestamp).getTime();
-          bValue = new Date(b.initiation_timestamp).getTime();
-          break;
-        case 'total_call_time':
-          aValue = (a.total_call_time?.minutes || 0) * 60 + (a.total_call_time?.seconds || 0);
-          bValue = (b.total_call_time?.minutes || 0) * 60 + (b.total_call_time?.seconds || 0);
-          break;
-        case 'queue_name':
-          aValue = a.queue_name || '';
-          bValue = b.queue_name || '';
-          break;
-        case 'disposition_title':
-          aValue = a.disposition_title || '';
-          bValue = b.disposition_title || '';
-          break;
-        default:
-          return 0;
-      }
-      
-      if (aValue < bValue) return sortDirection === 'asc' ? -1 : 1;
-      if (aValue > bValue) return sortDirection === 'asc' ? 1 : -1;
-      return 0;
-    });
-  }, [mergedCallLogs, selectedAgent, sortField, sortDirection]);
-
-  // Pagination calculations
-  const totalPages = Math.ceil(filteredAndSortedCallLogs.length / ITEMS_PER_PAGE);
-  const paginatedCallLogs = useMemo(() => {
-    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-    const endIndex = startIndex + ITEMS_PER_PAGE;
-    return filteredAndSortedCallLogs.slice(startIndex, endIndex);
-  }, [filteredAndSortedCallLogs, currentPage]);
-
-  // Calculate processing summary from merged data
-  const calculatedSummary = useMemo(() => {
-    const total = mergedCallLogs.length;
-    const transcribed = mergedCallLogs.filter(log => log.existsInSupabase).length;
-    const missing = mergedCallLogs.filter(log => !log.existsInSupabase && log.recording_location).length;
-    
-    return {
-      totalCalls: total,
-      existingTranscriptions: transcribed,
-      missingTranscriptions: missing,
-      processedThisRequest: autoProcessing.processed,
-      errors: autoProcessing.failed
-    };
-  }, [mergedCallLogs, autoProcessing.processed, autoProcessing.failed]);
-
-  const handleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    if (dateRange) {
+      query = `
+        SELECT * FROM reporting.contact_log 
+        WHERE agent_username IS NOT NULL
+        AND disposition_title IS NOT NULL
+        AND disposition_title NOT IN ('No Answer - No Voicemail Available', 'No Answer - Voicemail Available', 'Engaged', 'Done', 'Invalid Endpoint')
+        AND initiation_timestamp >= $1 
+        AND initiation_timestamp <= $2
+        ORDER BY initiation_timestamp DESC
+      `;
+      params = [dateRange.start, dateRange.end];
     } else {
-      setSortField(field);
-      setSortDirection('asc');
-    }
-  };
-
-  // Audio download function (unchanged)
-  const handleAudioDownload = async (log: CallLog) => {
-    if (!log.recording_location) {
-      alert("No audio file available for this call");
-      return;
+      query = `
+        SELECT * FROM reporting.contact_log 
+        WHERE agent_username IS NOT NULL
+        AND disposition_title IS NOT NULL
+        AND disposition_title NOT IN ('No Answer - No Voicemail Available', 'No Answer - Voicemail Available', 'Engaged', 'Done', 'Invalid Endpoint')
+        ORDER BY initiation_timestamp DESC
+      `;
     }
 
-    const contactId = log.contact_id;
-    
-    if (downloadingAudio.includes(contactId)) return;
+    const result = await pool.query(query, params);
+    return result.rows;
+  } catch (error) {
+    console.error("Database query error:", error);
+    throw error;
+  }
+}
 
-    setDownloadingAudio(prev => [...prev, contactId]);
+// NEW: Helper function to check if a single call exists in Supabase
+async function checkCallExistsInSupabase(contactId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from("call_records")
+      .select("contact_id")
+      .eq("contact_id", contactId)
+      .single();
 
-    try {
-      console.log(`🎵 Downloading call recording: ${contactId}`);
-
-      const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
-      
-      const response = await fetch(downloadUrl);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Download failed: ${response.status} - ${errorText}`);
-      }
-
-      const blob = await response.blob();
-      console.log(`📦 Downloaded: ${blob.size} bytes, type: ${blob.type}`);
-
-      if (blob.size === 0) {
-        throw new Error("Downloaded file is empty");
-      }
-
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = log.recording_location.split('/').pop() || `call_${contactId}.wav`;
-      
-      document.body.appendChild(a);
-      a.click();
-      
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      
-      console.log(`✅ Download completed for: ${contactId}`);
-
-    } catch (error) {
-      console.error(`❌ Download error for ${contactId}:`, error);
-      alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
-      setDownloadingAudio(prev => prev.filter(id => id !== contactId));
-    }
-  };
-
-  // Reset filters when data changes
-  useEffect(() => {
-    setSelectedAgent("all");
-    setCurrentPage(1);
-  }, [selectedDateRange]);
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [selectedAgent, sortField, sortDirection]);
-
-  // Get transcription status with enhanced info
-  const getTranscriptionStatus = (log: CallLog) => {
-    if (log.existsInSupabase) {
-      return (
-        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800"
-              title={`Transcribed: ${log.transcript_text ? log.transcript_text.substring(0, 100) + '...' : 'No preview'}`}>
-          <div className="w-2 h-2 bg-green-500 rounded-full mr-1"></div>
-          Transcribed
-          {log.primary_category && (
-            <span className="ml-1 text-green-600">({log.primary_category})</span>
-          )}
-        </span>
-      );
-    } else if (log.transcriptionStatus === "Processing" || autoProcessing.isRunning) {
-      return (
-        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-          <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
-          Processing
-          {log.transcriptionProgress && (
-            <span className="ml-1">({log.transcriptionProgress}%)</span>
-          )}
-        </span>
-      );
-    } else if (log.transcriptionStatus === "Failed") {
-      return (
-        <span 
-          className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800 cursor-help"
-          title={log.transcriptionError || "Transcription failed"}
-        >
-          <div className="w-2 h-2 bg-red-500 rounded-full mr-1"></div>
-          Failed
-        </span>
-      );
-    } else {
-      return (
-        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-          <div className="w-2 h-2 bg-gray-500 rounded-full mr-1"></div>
-          Pending
-        </span>
-      );
-    }
-  };
-
-  // FIXED: Improved process batch with better error handling and duplicate prevention
-  const processBatch = async (batchNumber: number) => {
-    if (!selectedDateRange) return false;
-
-    try {
-      const params = new URLSearchParams({
-        startDate: selectedDateRange.start.toISOString(),
-        endDate: selectedDateRange.end.toISOString(),
-        processTranscriptions: 'true',
-        maxProcessCount: BATCH_SIZE.toString(),
-      });
-
-      console.log(`🚀 Processing batch ${batchNumber} (${BATCH_SIZE} calls)...`);
-
-      const response = await fetch(`/api/process-calls?${params}`);
-      const data = await response.json();
-
-      if (data.success) {
-        // Refresh Supabase data to get newly transcribed calls
-        await fetchSupabaseRecords();
-
-        // Handle processing errors
-        if (data.errors && data.errors.length > 0) {
-          setProcessingErrors(prev => [...prev, ...data.errors]);
-        }
-
-        // Update auto-processing state
-        const processed = data.summary.processedThisRequest || 0;
-        const errors = data.errors?.length || 0;
-
-        setAutoProcessing(prev => ({
-          ...prev,
-          processed: prev.processed + processed,
-          failed: prev.failed + errors,
-          remaining: Math.max(0, prev.remaining - processed) // FIXED: Subtract actual processed, not batch size
-        }));
-
-        console.log(`✅ Batch ${batchNumber} completed: ${processed} processed, ${errors} failed`);
-        
-        // FIXED: Return true only if there are still calls missing transcriptions (based on fresh data)
-        return data.summary.missingTranscriptions > 0;
-      } else {
-        console.error(`❌ Batch ${batchNumber} failed:`, data.error);
-        setAutoProcessing(prev => ({
-          ...prev,
-          failed: prev.failed + 1 // FIXED: Increment by 1 for batch failure, not batch size
-        }));
-        return false;
-      }
-    } catch (err) {
-      console.error(`❌ Network error in batch ${batchNumber}:`, err);
-      setAutoProcessing(prev => ({
-        ...prev,
-        failed: prev.failed + 1 // FIXED: Increment by 1 for network error
-      }));
+    if (error && error.code !== "PGRST116") {
+      console.error(`Error checking call ${contactId}:`, error);
       return false;
     }
-  };
 
-  // FIXED: Improved auto-process function with proper serialization
-  const autoProcessAllTranscriptions = async (missingCount: number) => {
-    if (missingCount === 0) return;
+    return !!data;
+  } catch (error) {
+    console.error(`Error checking call ${contactId}:`, error);
+    return false;
+  }
+}
 
-    // FIXED: Prevent concurrent auto-processing
-    if (isAutoProcessingRunning.current) {
-      console.log('🚫 Auto-processing already running, skipping...');
-      return;
+// Helper function to check Supabase status for call logs
+async function enhanceCallLogsWithSupabaseStatus(
+  logs: CallLog[]
+): Promise<CallLog[]> {
+  try {
+    if (logs.length === 0) return logs;
+
+    const contactIds = logs.map((log) => log.contact_id);
+
+    const { data: existingRecords, error } = await supabase
+      .from("call_records")
+      .select("contact_id")
+      .in("contact_id", contactIds);
+
+    if (error) {
+      console.error("Error checking Supabase status:", error);
+      return logs.map((log) => ({ ...log, existsInSupabase: false }));
     }
 
-    isAutoProcessingRunning.current = true;
+    const existingContactIds = new Set(
+      existingRecords?.map((record) => record.contact_id) || []
+    );
 
-    const totalBatches = Math.ceil(missingCount / BATCH_SIZE);
-    
-    console.log(`🎯 Starting auto-processing: ${missingCount} calls in ${totalBatches} batches of ${BATCH_SIZE}`);
+    return logs.map((log) => ({
+      ...log,
+      existsInSupabase: existingContactIds.has(log.contact_id),
+    }));
+  } catch (error) {
+    console.error("Error enhancing call logs with Supabase status:", error);
+    return logs.map((log) => ({ ...log, existsInSupabase: false }));
+  }
+}
 
-    setAutoProcessing({
-      isRunning: true,
-      currentBatch: 0,
-      totalBatches,
-      processed: 0,
-      failed: 0,
-      remaining: missingCount
-    });
+// Helper function to construct SFTP paths
+function constructSftpPath(filename: string): string[] {
+  const possiblePaths = [];
 
-    setProcessing(true);
-    setProcessingErrors([]);
+  let decodedFilename = filename;
+  try {
+    decodedFilename = decodeURIComponent(filename);
+  } catch (error) {
+    console.log(`Could not decode filename: ${filename}`);
+  }
 
-    let currentBatch = 1;
-    let hasMoreToProcess = true;
+  if (decodedFilename.includes("/")) {
+    let cleanPath = decodedFilename;
 
-    try {
-      // FIXED: Properly serialize batch processing - wait for each batch to complete
-      while (hasMoreToProcess && currentBatch <= totalBatches) {
-        setAutoProcessing(prev => ({
-          ...prev,
-          currentBatch
-        }));
+    if (cleanPath.startsWith("amazon-connect-b1a9c08821e5/")) {
+      cleanPath = cleanPath.replace("amazon-connect-b1a9c08821e5/", "");
+    }
 
-        console.log(`📋 Processing batch ${currentBatch}/${totalBatches}...`);
+    if (!cleanPath.startsWith("./") && !cleanPath.startsWith("/")) {
+      cleanPath = `./${cleanPath}`;
+    }
 
-        hasMoreToProcess = await processBatch(currentBatch);
-        
-        // FIXED: Check if we should continue based on remaining work and batch results
-        if (!hasMoreToProcess) {
-          console.log(`✅ No more transcriptions needed after batch ${currentBatch}`);
-          break;
+    possiblePaths.push(cleanPath);
+
+    if (cleanPath.startsWith("./")) {
+      possiblePaths.push(cleanPath.substring(2));
+    }
+  }
+
+  const justFilename = decodedFilename.split("/").pop() || decodedFilename;
+
+  // Try current date and previous 7 days
+  const currentDate = new Date();
+  for (let daysBack = 0; daysBack <= 7; daysBack++) {
+    const targetDate = new Date(currentDate);
+    targetDate.setDate(currentDate.getDate() - daysBack);
+
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    const day = targetDate.getDate();
+
+    const datePath = `${year}/${month.toString().padStart(2, "0")}/${day
+      .toString()
+      .padStart(2, "0")}`;
+
+    possiblePaths.push(`./${datePath}/${justFilename}`);
+    possiblePaths.push(`${datePath}/${justFilename}`);
+  }
+
+  possiblePaths.push(`./${justFilename}`);
+  possiblePaths.push(justFilename);
+
+  return Array.from(new Set(possiblePaths));
+}
+
+// Helper function to download audio file from SFTP
+async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
+  const sftpConfig = getSftpConfig();
+
+  return new Promise<Buffer>((resolve, reject) => {
+    const conn = new Client();
+    let resolved = false;
+    let sftpSession: any = null;
+
+    const cleanup = () => {
+      try {
+        if (sftpSession) {
+          sftpSession.end();
+          sftpSession = null;
         }
-
-        // FIXED: Longer delay between batches to ensure proper processing
-        if (currentBatch < totalBatches) {
-          console.log(`⏸️ Waiting 5 seconds before next batch...`);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-
-        currentBatch++;
-      }
-    } catch (error) {
-      console.error('❌ Error in auto-processing:', error);
-    } finally {
-      setAutoProcessing(prev => ({
-        ...prev,
-        isRunning: false
-      }));
-
-      setProcessing(false);
-      isAutoProcessingRunning.current = false; // FIXED: Reset the running flag
-
-      console.log(`🎉 Auto-processing completed! Processed: ${autoProcessing.processed}, Failed: ${autoProcessing.failed}`);
-    }
-  };
-
-  // Setup real-time updates for Supabase
-  useEffect(() => {
-    if (!selectedDateRange) return;
-
-    // Clear existing interval
-    if (realtimeInterval.current) {
-      clearInterval(realtimeInterval.current);
-    }
-
-    // Setup new interval for real-time updates
-    realtimeInterval.current = setInterval(() => {
-      // FIXED: Only update if not currently auto-processing to avoid conflicts
-      if (!isAutoProcessingRunning.current) {
-        console.log('🔄 Real-time update: Refreshing Supabase records...');
-        fetchSupabaseRecords();
-      }
-    }, REALTIME_UPDATE_INTERVAL);
-
-    // Cleanup on unmount or date range change
-    return () => {
-      if (realtimeInterval.current) {
-        clearInterval(realtimeInterval.current);
-        realtimeInterval.current = null;
+        conn.end();
+      } catch (e) {
+        console.log("Cleanup error:", e);
       }
     };
-  }, [selectedDateRange]);
 
-  // Fetch call logs using the unified route (after Supabase check)
-  useEffect(() => {
-    const fetchCallLogs = async () => {
-      if (!selectedDateRange) return;
+    conn.on("ready", () => {
+      console.log("SFTP connection ready for", filename);
 
-      const dateRangeKey = `${selectedDateRange.start.toISOString()}-${selectedDateRange.end.toISOString()}`;
+      conn.sftp((err, sftp) => {
+        if (err) {
+          console.error("SFTP session error:", err);
+          if (!resolved) {
+            resolved = true;
+            cleanup();
+            reject(new Error("SFTP session error"));
+          }
+          return;
+        }
 
-      setLoading(true);
-      setError(null);
-      setProcessingSummary(null);
-      setProcessingErrors([]);
-      setAutoProcessing({
-        isRunning: false,
-        currentBatch: 0,
-        totalBatches: 0,
-        processed: 0,
-        failed: 0,
-        remaining: 0
-      });
+        sftpSession = sftp;
+        const possiblePaths = constructSftpPath(filename);
+        console.log(`Searching ${possiblePaths.length} paths for ${filename}`);
 
-      try {
-        // Step 1: First fetch Supabase records
-        console.log('🔍 Step 1: Fetching Supabase transcriptions...');
-        await fetchSupabaseRecords();
+        let pathIndex = 0;
 
-        // Step 2: Then fetch call logs from database
-        console.log('📊 Step 2: Fetching call logs from database...');
-        const params = new URLSearchParams({
-          startDate: selectedDateRange.start.toISOString(),
-          endDate: selectedDateRange.end.toISOString(),
-          processTranscriptions: 'false', // Just fetch data initially, don't process
-        });
+        const tryNextPath = async () => {
+          if (resolved) return;
 
-        const response = await fetch(`/api/process-calls?${params}`);
-        const data = await response.json();
-
-        if (data.success) {
-          setCallLogs(data.data || []);
-          console.log('📋 Call logs loaded:', data.summary);
-
-          // FIXED: Only start auto-processing if not already running and not initiated for this date range
-          const missing = data.summary.missingTranscriptions;
-          if (missing > 0 && 
-              autoProcessingInitiated.current !== dateRangeKey && 
-              !isAutoProcessingRunning.current) {
-            autoProcessingInitiated.current = dateRangeKey;
-            console.log(`🚀 Auto-starting transcription processing for ${missing} missing calls...`);
-            
-            // FIXED: Start auto-processing after a longer delay to ensure state is settled
-            setTimeout(() => {
-              autoProcessAllTranscriptions(missing);
-            }, 1000);
+          if (pathIndex >= possiblePaths.length) {
+            console.error(`File not found in ${possiblePaths.length} paths`);
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              reject(new Error("Audio file not found"));
+            }
+            return;
           }
 
-        } else {
-          setError(data.error || "Failed to fetch call logs");
-        }
-      } catch (err) {
-        setError("Network error occurred while fetching call logs");
-        console.error("Error fetching call logs:", err);
-      } finally {
-        setLoading(false);
+          const currentPath = possiblePaths[pathIndex];
+          console.log(
+            `Trying path ${pathIndex + 1}/${
+              possiblePaths.length
+            }: ${currentPath}`
+          );
+
+          try {
+            const stats = await new Promise<any>(
+              (resolveStats, rejectStats) => {
+                sftp.stat(currentPath, (statErr, statsResult) => {
+                  if (statErr) {
+                    rejectStats(statErr);
+                  } else {
+                    resolveStats(statsResult);
+                  }
+                });
+              }
+            );
+
+            const sizeInMB = stats.size / (1024 * 1024);
+            console.log(`Found file: ${sizeInMB.toFixed(2)}MB`);
+
+            if (stats.size === 0) {
+              console.log(`Empty file, trying next`);
+              pathIndex++;
+              return tryNextPath();
+            }
+
+            if (stats.size < 10000) {
+              console.log(`File too small: ${stats.size} bytes`);
+              pathIndex++;
+              return tryNextPath();
+            }
+
+            console.log(`Downloading ${stats.size} bytes`);
+
+            const fileData = await new Promise<Buffer>(
+              (resolveDownload, rejectDownload) => {
+                const fileBuffers: Buffer[] = [];
+                let totalBytesReceived = 0;
+
+                const readStream = sftp.createReadStream(currentPath, {
+                  highWaterMark: 256 * 1024,
+                });
+
+                readStream.on("error", (readErr: Error) => {
+                  console.error(`Stream error: ${readErr.message}`);
+                  rejectDownload(readErr);
+                });
+
+                readStream.on("data", (chunk: Buffer) => {
+                  fileBuffers.push(chunk);
+                  totalBytesReceived += chunk.length;
+
+                  if (totalBytesReceived % (1024 * 1024) < chunk.length) {
+                    const progress = (
+                      (totalBytesReceived / stats.size) *
+                      100
+                    ).toFixed(0);
+                    console.log(
+                      `Progress: ${progress}% (${(
+                        totalBytesReceived /
+                        (1024 * 1024)
+                      ).toFixed(1)}MB)`
+                    );
+                  }
+                });
+
+                readStream.on("end", () => {
+                  const audioBuffer = Buffer.concat(fileBuffers);
+                  console.log(`Downloaded: ${audioBuffer.length} bytes`);
+
+                  if (audioBuffer.length !== stats.size) {
+                    rejectDownload(
+                      new Error(
+                        `Size mismatch: expected ${stats.size}, got ${audioBuffer.length}`
+                      )
+                    );
+                  } else {
+                    resolveDownload(audioBuffer);
+                  }
+                });
+              }
+            );
+
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              resolve(fileData);
+            }
+            return;
+          } catch (error) {
+            console.log(
+              `Error with path ${pathIndex + 1}: ${
+                error instanceof Error ? error.message : "Unknown"
+              }`
+            );
+            pathIndex++;
+            setTimeout(tryNextPath, 200);
+          }
+        };
+
+        tryNextPath();
+      });
+    });
+
+    conn.on("error", (err) => {
+      console.error("SFTP connection error:", err.message);
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        reject(new Error("SFTP connection failed"));
       }
+    });
+
+    try {
+      conn.connect({
+        ...sftpConfig,
+        keepaliveInterval: 30000,
+        keepaliveCountMax: 10,
+        algorithms: {
+          compress: ["none"],
+        },
+        tryKeyboard: false,
+      });
+    } catch (e) {
+      console.error("Connection setup error:", e);
+      if (!resolved) {
+        resolved = true;
+        reject(new Error("Failed to initialize SFTP connection"));
+      }
+    }
+  });
+}
+
+// Helper function to upload audio to AssemblyAI
+async function uploadToAssemblyAI(
+  audioBuffer: Buffer,
+  apiKey: string
+): Promise<string> {
+  console.log("Uploading audio to AssemblyAI...");
+
+  // Convert Buffer to Uint8Array for fetch compatibility
+  const uint8Array = new Uint8Array(audioBuffer);
+
+  const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
+    method: "POST",
+    headers: {
+      Authorization: apiKey,
+      "Content-Type": "application/octet-stream",
+    },
+    body: uint8Array,
+  });
+
+  if (!uploadResponse.ok) {
+    const errorText = await uploadResponse.text();
+    throw new Error(
+      `AssemblyAI upload failed: ${uploadResponse.status} - ${errorText}`
+    );
+  }
+
+  const { upload_url } = await uploadResponse.json();
+  console.log("Audio uploaded to AssemblyAI successfully");
+  return upload_url;
+}
+
+// Helper function for topic categorization
+async function performTopicCategorization(transcriptData: any): Promise<{
+  primary_category: string;
+  topic_categories: string[];
+  confidence: number;
+} | null> {
+  try {
+    const serverUrl =
+      process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101";
+
+    const response = await fetch(`${serverUrl}/api/openAI/categorise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript: transcriptData }),
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!response.ok) {
+      console.error("Topic categorization failed:", response.status);
+      return null;
+    }
+
+    const topicData = await response.json();
+
+    if (topicData.topic_categories && topicData.topic_categories.length > 0) {
+      return {
+        primary_category: topicData.primary_category,
+        topic_categories: topicData.topic_categories,
+        confidence: topicData.confidence || 1.0,
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Error in topic categorization:", error);
+    return null;
+  }
+}
+
+// Helper function to transcribe audio with AssemblyAI
+async function transcribeAudio(
+  uploadUrl: string,
+  speakerCount: number = 2
+): Promise<any> {
+  const apiKey = process.env.ASSEMBLYAI_API_KEY!;
+
+  console.log("Submitting transcription to AssemblyAI...");
+
+  const transcriptResponse = await fetch(
+    "https://api.assemblyai.com/v2/transcript",
+    {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        audio_url: uploadUrl,
+        speech_model: "best",
+        word_boost: [
+          "Team",
+          "Global",
+          "Express",
+          "Freight",
+          "Referred",
+          "You're",
+          "Logistics",
+          "Calling",
+          "Regards",
+          "Referral",
+          "Transportation",
+          "Shipment",
+          "Supply Chain",
+          "Carrier",
+          "Warehouse",
+          "Cargo",
+          "Dispatch",
+          "Consignment",
+          "Tracking",
+          "Delivery",
+          "Inventory",
+          "Import",
+          "Export",
+          "Port",
+          "Barge",
+          "Forwarding",
+          "Customs",
+          "Route",
+          "Tracking Number",
+          "Handling",
+          "Third-party",
+          "Broker",
+          "Load",
+          "Pallet",
+          "Shipping",
+          "Logistics Management",
+          "Freight Forwarder",
+          "Fleet",
+          "Intermodal",
+          "Air Freight",
+          "Sea Freight",
+          "Freight Rates",
+          "Lead Time",
+          "Shipping Label",
+          "Warehouse Management",
+          "Distribution",
+          "Freight Broker",
+          "Freight Consolidation",
+          "Cross-docking",
+          "Port of Entry",
+          "Drop-off",
+          "Pickup",
+          "Route Optimization",
+          "Fleet Management",
+          "Supply Chain Solutions",
+          "Full Truckload",
+          "Less-than-Truckload",
+          "3PL",
+          "Logistics Provider",
+          "Transporter",
+          "Freight Class",
+          "Shipping Terms",
+          "Logistics Network",
+        ],
+        speaker_labels: true,
+        speakers_expected: speakerCount,
+        summarization: true,
+        summary_model: "conversational",
+        summary_type: "paragraph",
+        entity_detection: true,
+        sentiment_analysis: true,
+        filter_profanity: false,
+        auto_highlights: true,
+        punctuate: true,
+        format_text: true,
+      }),
+    }
+  );
+
+  if (!transcriptResponse.ok) {
+    const errorData = await transcriptResponse.json();
+    throw new Error(
+      `AssemblyAI submission failed: ${JSON.stringify(errorData)}`
+    );
+  }
+
+  const { id } = await transcriptResponse.json();
+  console.log(`Transcription job created: ${id}`);
+
+  // Poll for completion
+  let transcript;
+  let status = "processing";
+  let attempts = 0;
+  const maxAttempts = 120; // 10 minutes at 5-second intervals
+  const pollInterval = 5000;
+
+  while (
+    (status === "processing" || status === "queued") &&
+    attempts < maxAttempts
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    attempts++;
+
+    const statusResponse = await fetch(
+      `https://api.assemblyai.com/v2/transcript/${id}`,
+      {
+        headers: { Authorization: apiKey },
+      }
+    );
+
+    if (!statusResponse.ok) {
+      throw new Error(`Status check failed: ${statusResponse.status}`);
+    }
+
+    transcript = await statusResponse.json();
+    status = transcript.status;
+
+    if (attempts % 12 === 0) {
+      // Log every minute
+      console.log(`Transcription status after ${attempts * 5}s: ${status}`);
+    }
+
+    if (status === "completed" || status === "error") {
+      break;
+    }
+  }
+
+  if (status === "error") {
+    throw new Error(
+      `Transcription failed: ${transcript?.error || "Unknown error"}`
+    );
+  }
+
+  if (status !== "completed") {
+    throw new Error(
+      `Transcription timed out after ${(maxAttempts * pollInterval) / 1000}s`
+    );
+  }
+
+  console.log("Transcription completed successfully");
+
+  // Process speaker roles
+  if (transcript.utterances) {
+    transcript.utterances = transcript.utterances.map((utterance: any) => ({
+      ...utterance,
+      speakerRole: utterance.speaker === "A" ? "Agent" : "Customer",
+    }));
+  }
+
+  if (transcript.words) {
+    transcript.words = transcript.words.map((word: any) => ({
+      ...word,
+      speakerRole: word.speaker === "A" ? "Agent" : "Customer",
+    }));
+  }
+
+  return transcript;
+}
+
+// Helper function to save transcription to Supabase
+async function saveTranscriptionToSupabase(
+  callData: CallLog,
+  transcriptData: any,
+  categorization: any = null
+): Promise<void> {
+  try {
+    const payload: TranscriptionData = {
+      contact_id: callData.contact_id,
+      recording_location: callData.recording_location || "",
+      transcript_text: transcriptData.text || "",
+      queue_name: callData.queue_name || "",
+      agent_username: callData.agent_username || "",
+      initiation_timestamp:
+        callData.initiation_timestamp || new Date().toISOString(),
+      speaker_data: transcriptData.utterances
+        ? JSON.stringify(transcriptData.utterances)
+        : null,
+      sentiment_analysis: transcriptData.sentiment_analysis_results
+        ? JSON.stringify(transcriptData.sentiment_analysis_results)
+        : null,
+      entities: transcriptData.entities
+        ? JSON.stringify(transcriptData.entities)
+        : null,
+      disposition_title: callData.disposition_title || "",
+      call_summary: transcriptData.summary || null,
+      campaign_name: callData.campaign_name || null,
+      campaign_id: callData.campaign_id?.toString() || null,
+      customer_cli: callData.customer_cli || null,
+      agent_hold_time: callData.agent_hold_time || null,
+      total_hold_time: callData.total_hold_time || null,
+      time_in_queue: callData.time_in_queue || null,
+      call_duration: JSON.stringify(callData.total_call_time) || "",
+      categories: categorization?.topic_categories
+        ? JSON.stringify(categorization.topic_categories)
+        : transcriptData.topic_categorization?.all_topics
+        ? JSON.stringify(transcriptData.topic_categorization.all_topics)
+        : null,
+      primary_category:
+        categorization?.primary_category ||
+        transcriptData.topic_categorization?.primary_topic ||
+        null,
     };
 
-    fetchCallLogs();
-  }, [selectedDateRange, checkSupabase]);
+    console.log(
+      "Saving transcription to Supabase for contact_id:",
+      payload.contact_id
+    );
 
-  const formatTimestamp = (timestamp: string) => {
-    return new Date(timestamp).toLocaleString();
-  };
+    // Check if record already exists
+    const { data: existingRecord, error: checkError } = await supabase
+      .from("call_records")
+      .select("contact_id")
+      .eq("contact_id", payload.contact_id)
+      .single();
 
-  const formatCallDuration = (totalCallTime: { minutes: number; seconds: number }) => {
-    if (!totalCallTime) return "N/A";
-    const { minutes = 0, seconds = 0 } = totalCallTime;
-    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-  };
+    if (checkError && checkError.code !== "PGRST116") {
+      throw new Error(`Error checking existing record: ${checkError.message}`);
+    }
 
-  const getSortIcon = (field: SortField) => {
-    if (sortField !== field) return '↕️';
-    return sortDirection === 'asc' ? '↑' : '↓';
-  };
+    if (existingRecord) {
+      // Update existing record
+      const { error } = await supabase
+        .from("call_records")
+        .update(payload)
+        .eq("contact_id", payload.contact_id);
 
-  return (
-    <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
-      <div className="flex items-center justify-between mb-4">
-        <h5 className="text-[#4ecca3]">Call Logs & Transcriptions</h5>
-        <div className="flex items-center gap-2">
-          {lastSupabaseUpdate && (
-            <div className="text-xs text-gray-400">
-              Last updated: {new Date(lastSupabaseUpdate).toLocaleTimeString()}
-            </div>
-          )}
-          <Link
-            href="/tge/overview"
-            className="px-3 py-2 bg-[#4ecca3] text-[#0a101b] rounded-lg hover:bg-[#3bb891] transition-colors text-sm font-medium"
-          >
-            View All Transcribed Calls
-          </Link>
-        </div>
-      </div>
+      if (error) {
+        throw new Error(`Failed to update record: ${error.message}`);
+      }
 
-      {!selectedDateRange ? (
-        <div>Please Select A Date Range</div>
-      ) : (
-        <div>
-          <div className="mb-4">
-            <h6 className="text-sm text-white">
-              Call Data for {selectedDateRange.label}
-              {loadingSupabase && (
-                <span className="ml-2 text-xs text-yellow-400">🔄 Refreshing transcriptions...</span>
-              )}
-            </h6>
-          </div>
+      console.log("Successfully updated existing record");
+    } else {
+      // Insert new record
+      const { error } = await supabase.from("call_records").insert([payload]);
 
-          {/* Real-time Status Banner */}
-          <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
-            <div className="text-xs text-blue-300">
-              🔄 Real-time updates: Checking Supabase every {REALTIME_UPDATE_INTERVAL/1000} seconds for new transcriptions
-              {isAutoProcessingRunning.current && (
-                <span className="ml-2 text-yellow-400">(Paused during auto-processing)</span>
-              )}
-            </div>
-          </div>
+      if (error) {
+        throw new Error(`Failed to insert record: ${error.message}`);
+      }
 
-          {/* Auto-Processing Status */}
-          {autoProcessing.isRunning && (
-            <div className="mb-4 p-4 bg-blue-900 border border-blue-600 rounded-lg">
-              <div className="text-sm text-blue-300 font-medium mb-2">
-                🤖 Auto-Processing Transcriptions (Serialized)
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-blue-200">
-                <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}/{autoProcessing.totalBatches}</span></div>
-                <div>Processed: <span className="text-green-400 font-medium">{autoProcessing.processed}</span></div>
-                <div>Failed: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
-                <div>Remaining: <span className="text-yellow-400 font-medium">{autoProcessing.remaining}</span></div>
-              </div>
-              <div className="mt-2">
-                <div className="w-full bg-blue-800 rounded-full h-2">
-                  <div 
-                    className="bg-blue-400 h-2 rounded-full transition-all duration-500" 
-                    style={{ 
-                      width: `${autoProcessing.totalBatches > 0 ? (autoProcessing.currentBatch / autoProcessing.totalBatches) * 100 : 0}%` 
-                    }}
-                  ></div>
-                </div>
-                <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 5-second delays (prevents duplicates)
-                </div>
-              </div>
-            </div>
-          )}
+      console.log("Successfully inserted new record");
+    }
+  } catch (error) {
+    console.error("Error saving to Supabase:", error);
+    throw error;
+  }
+}
 
-          {/* Enhanced Processing Summary */}
-          <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
-            <div className="text-sm text-[#4ecca3] font-medium mb-2">
-              📊 Live Processing Summary
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
-              <div>Total Calls: <span className="text-white font-medium">{calculatedSummary.totalCalls}</span></div>
-              <div>Transcribed: <span className="text-green-400 font-medium">{calculatedSummary.existingTranscriptions}</span></div>
-              <div>Missing: <span className="text-yellow-400 font-medium">{calculatedSummary.missingTranscriptions}</span></div>
-              <div>Auto-Processed: <span className="text-blue-400 font-medium">{autoProcessing.processed}</span></div>
-              <div>Errors: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
-            </div>
-            
-            {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
-              <div className="mt-3 flex items-center gap-2">
-                <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions (duplicate-safe)
-                </div>
-                <button
-                  onClick={() => fetchSupabaseRecords()}
-                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
-                >
-                  🔄 Refresh Now
-                </button>
-              </div>
-            )}
-          </div>
+// NEW: In-memory tracking for processing calls to prevent duplicates
+const processingCalls = new Set<string>();
+const attemptedCalls = new Map<string, number>(); // contact_id -> attempt count
+const MAX_ATTEMPTS = 3;
 
-          {/* Processing Errors */}
-          {processingErrors.length > 0 && (
-            <div className="mb-4 p-3 bg-red-900 border border-red-600 rounded-lg">
-              <div className="text-sm text-red-300 font-medium mb-2">
-                ⚠️ Processing Errors ({processingErrors.length})
-              </div>
-              <div className="max-h-32 overflow-y-auto">
-                {processingErrors.slice(0, 10).map((err, index) => (
-                  <div key={index} className="text-xs text-red-200 mb-1">
-                    <span className="font-mono">{err.contact_id}</span>: {err.error}
-                  </div>
-                ))}
-                {processingErrors.length > 10 && (
-                  <div className="text-xs text-red-300 mt-2">
-                    ... and {processingErrors.length - 10} more errors
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+// NEW: Function to get fresh missing transcriptions with exclusions
+async function getFreshMissingTranscriptions(
+  dateRange?: DateRange,
+  maxCount?: number,
+  excludeContactIds: string[] = []
+): Promise<CallLog[]> {
+  try {
+    console.log("🔄 Getting fresh list of missing transcriptions...");
+    console.log(`📋 Excluding ${excludeContactIds.length} contact IDs:`, excludeContactIds.slice(0, 5));
+    
+    // Get call logs from database
+    const logs = await getContactLogs(dateRange);
+    
+    // Check current Supabase status
+    const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(logs);
+    
+    // Filter for missing transcriptions with exclusions
+    const missingTranscriptions = enhancedLogs.filter(
+      (log) => 
+        !log.existsInSupabase && 
+        log.recording_location &&
+        !excludeContactIds.includes(log.contact_id) &&
+        !processingCalls.has(log.contact_id) &&
+        (attemptedCalls.get(log.contact_id) || 0) < MAX_ATTEMPTS
+    );
 
-          {/* Enhanced Agent Filter */}
-          {uniqueAgents.length > 0 && (
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-white mb-2">
-                Filter by Agent:
-              </label>
-              <select
-                value={selectedAgent}
-                onChange={(e) => setSelectedAgent(e.target.value)}
-                className="px-3 py-2 bg-bg-primary border border-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[#4ecca3] focus:border-transparent"
-              >
-                <option value="all">All Agents ({mergedCallLogs.length} calls)</option>
-                {uniqueAgents.map((agent) => {
-                  const agentCallCount = mergedCallLogs.filter(log => log.agent_username === agent).length;
-                  const transcribedCount = mergedCallLogs.filter(log => log.agent_username === agent && log.existsInSupabase).length;
-                  return (
-                    <option key={agent} value={agent}>
-                      {agent} ({agentCallCount} calls, {transcribedCount} transcribed)
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-          )}
+    console.log(`Found ${missingTranscriptions.length} fresh missing transcriptions (after exclusions)`);
 
-          {(loading || loadingSupabase) && (
-            <div className="flex items-center justify-center p-8">
-              <div className="text-gray-500">
-                {loading && loadingSupabase ? "📊 Loading call logs and transcriptions..." : 
-                 loading ? "📊 Loading call logs..." : 
-                 "🔍 Fetching transcriptions from Supabase..."}
-              </div>
-            </div>
-          )}
+    // Return limited set if maxCount specified
+    return maxCount 
+      ? missingTranscriptions.slice(0, maxCount)
+      : missingTranscriptions;
+  } catch (error) {
+    console.error("Error getting fresh missing transcriptions:", error);
+    return [];
+  }
+}
 
-          {(processing || autoProcessing.isRunning) && (
-            <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
-              <div className="text-yellow-200">
-                {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (serialized, duplicate-safe)...` 
-                  : '🚀 Processing transcriptions...'
+// NEW: Function to mark call as being processed
+function markCallAsProcessing(contactId: string) {
+  processingCalls.add(contactId);
+  console.log(`🔒 Marked ${contactId} as processing`);
+}
+
+// NEW: Function to unmark call as being processed
+function unmarkCallAsProcessing(contactId: string, success: boolean = false) {
+  processingCalls.delete(contactId);
+  
+  if (!success) {
+    const attempts = (attemptedCalls.get(contactId) || 0) + 1;
+    attemptedCalls.set(contactId, attempts);
+    console.log(`❌ Unmarked ${contactId} as processing (attempt ${attempts}/${MAX_ATTEMPTS})`);
+  } else {
+    attemptedCalls.delete(contactId);
+    console.log(`✅ Unmarked ${contactId} as processing (success)`);
+  }
+}
+
+// NEW: Function to clear processing state (for cleanup)
+function clearProcessingState() {
+  processingCalls.clear();
+  attemptedCalls.clear();
+  console.log("🧹 Cleared all processing state");
+}
+
+// Main API handler
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const processTranscriptions =
+      searchParams.get("processTranscriptions") === "true";
+    const maxProcessCount = parseInt(
+      searchParams.get("maxProcessCount") || "3"
+    );
+    // NEW: Get excluded contact IDs from query params
+    const excludeContactIdsParam = searchParams.get("excludeContactIds");
+    const excludeContactIds = excludeContactIdsParam 
+      ? excludeContactIdsParam.split(',').filter(id => id.trim() !== '')
+      : [];
+
+    console.log("🚀 Starting unified call processing workflow");
+    if (excludeContactIds.length > 0) {
+      console.log(`📋 Excluding ${excludeContactIds.length} contact IDs from processing`);
+    }
+
+    let dateRange: DateRange | undefined;
+
+    if (startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        return NextResponse.json(
+          { error: "Invalid date format. Please use ISO date format." },
+          { status: 400 }
+        );
+      }
+
+      if (start > end) {
+        return NextResponse.json(
+          { error: "Start date must be before or equal to end date." },
+          { status: 400 }
+        );
+      }
+
+      dateRange = { start, end };
+    }
+
+    // Step 1: Get call logs from database
+    console.log("📊 Step 1: Fetching call logs from database...");
+    let logs = await getContactLogs(dateRange);
+    console.log(`Found ${logs.length} call logs`);
+
+    // Step 2: Check Supabase status
+    console.log("🔍 Step 2: Checking Supabase for existing transcriptions...");
+    logs = await enhanceCallLogsWithSupabaseStatus(logs);
+
+    const missingTranscriptions = logs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
+    );
+    console.log(
+      `Found ${missingTranscriptions.length} calls without transcriptions`
+    );
+
+    let processedCount = 0;
+    const errors: any[] = [];
+    const processedContactIds: string[] = []; // NEW: Track which calls we've processed
+
+    // Step 3: Process missing transcriptions (if requested)
+    if (processTranscriptions && missingTranscriptions.length > 0) {
+      console.log(
+        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions...`
+      );
+
+      const apiKey = process.env.ASSEMBLYAI_API_KEY;
+      if (!apiKey) {
+        return NextResponse.json(
+          { error: "AssemblyAI API key not configured" },
+          { status: 500 }
+        );
+      }
+
+      // FIXED: Get fresh missing transcriptions with exclusions
+      const freshMissingTranscriptions = await getFreshMissingTranscriptions(
+        dateRange,
+        maxProcessCount,
+        [...processedContactIds, ...excludeContactIds] // Combine local processed + excluded from client
+      );
+
+      console.log(`🎯 Processing ${freshMissingTranscriptions.length} fresh missing transcriptions`);
+
+      for (const log of freshMissingTranscriptions) {
+        try {
+          console.log(`\n🔍 Final check for call ${log.contact_id}...`);
+
+          // FIXED: Double-check right before processing each individual call
+          const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
+          if (!stillMissing) {
+            console.log(`⏭️ Call ${log.contact_id} already processed by another batch, skipping...`);
+            continue;
+          }
+
+          // NEW: Mark call as being processed
+          markCallAsProcessing(log.contact_id);
+
+          console.log(`🎯 Processing call ${log.contact_id}...`);
+
+          // Download audio from SFTP
+          console.log("📥 Downloading audio from SFTP...");
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
+
+          // Upload to AssemblyAI
+          console.log("⬆️ Uploading to AssemblyAI...");
+          const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
+
+          // Transcribe audio
+          console.log("🎙️ Transcribing audio...");
+          const transcript = await transcribeAudio(uploadUrl, 2);
+
+          // Perform topic categorization
+          console.log("🏷️ Performing topic categorization...");
+          let categorization: {
+            primary_category: string;
+            topic_categories: string[];
+            confidence: number;
+          } | null = null;
+
+          if (transcript.utterances && transcript.utterances.length > 0) {
+            try {
+              categorization = await performTopicCategorization(transcript);
+            } catch (catError) {
+              console.error("⚠️ Categorization failed:", catError);
+            }
+
+            transcript.topic_categorization = categorization
+              ? {
+                  primary_topic: categorization.primary_category,
+                  all_topics: categorization.topic_categories,
+                  confidence: categorization.confidence,
                 }
-              </div>
-            </div>
-          )}
+              : {
+                  primary_topic: "Uncategorised",
+                  all_topics: ["Uncategorised"],
+                  confidence: 0,
+                };
+          }
 
-          {error && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-              Error: {error}
-            </div>
-          )}
+          // FIXED: Final check before saving to prevent race conditions
+          console.log("🔒 Final check before saving...");
+          const finalCheck = await checkCallExistsInSupabase(log.contact_id);
+          if (finalCheck) {
+            console.log(`⚠️ Call ${log.contact_id} was processed by another batch during processing, skipping save...`);
+            unmarkCallAsProcessing(log.contact_id, false);
+            continue;
+          }
 
-          {!loading && !error && (
-            <div>
-              <div className="mb-4 flex justify-between items-center">
-                <div className="text-sm text-white">
-                  {selectedAgent === "all" 
-                    ? `Found ${filteredAndSortedCallLogs.length} call(s) - Page ${currentPage} of ${totalPages} (showing ${paginatedCallLogs.length} records)` 
-                    : `Showing ${filteredAndSortedCallLogs.length} call(s) for ${selectedAgent} - Page ${currentPage} of ${totalPages} (${paginatedCallLogs.length} records) - ${mergedCallLogs.length} total calls`
-                  }
-                </div>
-                
-                {/* Pagination Controls */}
-                {totalPages > 1 && (
-                  <div className="flex items-center space-x-2">
-                    <button
-                      onClick={() => setCurrentPage(1)}
-                      disabled={currentPage === 1}
-                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
-                    >
-                      First
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage(currentPage - 1)}
-                      disabled={currentPage === 1}
-                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
-                    >
-                      Previous
-                    </button>
-                    <span className="text-xs text-white px-2">
-                      {currentPage} / {totalPages}
-                    </span>
-                    <button
-                      onClick={() => setCurrentPage(currentPage + 1)}
-                      disabled={currentPage === totalPages}
-                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
-                    >
-                      Next
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage(totalPages)}
-                      disabled={currentPage === totalPages}
-                      className="px-2 py-1 text-xs bg-bg-primary border border-border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-700 text-white"
-                    >
-                      Last
-                    </button>
-                  </div>
-                )}
-              </div>
+          // Save to Supabase
+          console.log("💾 Saving to Supabase...");
+          await saveTranscriptionToSupabase(log, transcript, categorization);
 
-              {filteredAndSortedCallLogs.length === 0 ? (
-                <div className="text-gray-500 p-4 text-center">
-                  {selectedAgent === "all" 
-                    ? "No call logs found for this date range"
-                    : `No call logs found for agent ${selectedAgent} in this date range`
-                  }
-                </div>
-              ) : (
-                <div className="overflow-hidden border border-border rounded-lg">
-                  <div className="overflow-x-auto max-h-[calc(100vh-420px)]">
-                    <table className="min-w-full bg-bg-primary">
-                      <thead className="bg-bg-secondary border-b border-border sticky top-0 z-10">
-                        <tr>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('agent_username')}
-                          >
-                            Agent {getSortIcon('agent_username')}
-                          </th>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('initiation_timestamp')}
-                          >
-                            Call Date/Time {getSortIcon('initiation_timestamp')}
-                          </th>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('total_call_time')}
-                          >
-                            Duration {getSortIcon('total_call_time')}
-                          </th>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('queue_name')}
-                          >
-                            Queue {getSortIcon('queue_name')}
-                          </th>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('disposition_title')}
-                          >
-                            Disposition {getSortIcon('disposition_title')}
-                          </th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
-                            Transcription Status
-                          </th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
-                            Actions
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border">
-                        {paginatedCallLogs.map((log, index) => (
-                          <tr 
-                            key={log.contact_id || index}
-                            className={`hover:bg-gray-800 transition-colors ${log.existsInSupabase ? 'bg-green-900/20' : ''}`}
-                          >
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {log.agent_username}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {formatTimestamp(log.initiation_timestamp)}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {formatCallDuration(log.total_call_time)}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {log.queue_name || "N/A"}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {log.disposition_title || "N/A"}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm">
-                              {getTranscriptionStatus(log)}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm">
-                              <div className="flex items-center space-x-2">
-                                <Link 
-                                  href={`/tge/${log.contact_id}`}
-                                  className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
-                                >
-                                  {log.existsInSupabase ? 'View Transcript' : 'View Details'}
-                                </Link>
-                                
-                                {log.recording_location && (
-                                  <button
-                                    onClick={() => handleAudioDownload(log)}
-                                    disabled={downloadingAudio.includes(log.contact_id)}
-                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
-                                    title="Download audio file"
-                                  >
-                                    {downloadingAudio.includes(log.contact_id) ? (
-                                      <>
-                                        <svg className="animate-spin -ml-1 mr-1 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        Downloading...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                        </svg>
-                                        Audio
-                                      </>
-                                    )}
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
+          // Update log status
+          log.existsInSupabase = true;
+          processedCount++;
+          processedContactIds.push(log.contact_id); // NEW: Track this as processed
 
-export default CallLogDisplay;
+          // NEW: Mark as successfully processed
+          unmarkCallAsProcessing(log.contact_id, true);
+
+          console.log(`✅ Successfully processed call ${log.contact_id}`);
+        } catch (error) {
+          console.error(`❌ Error processing call ${log.contact_id}:`, error);
+          
+          // NEW: Unmark as processing on error
+          unmarkCallAsProcessing(log.contact_id, false);
+          
+          errors.push({
+            contact_id: log.contact_id,
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+    }
+
+    // Step 4: Get final fresh status after processing
+    console.log("📋 Step 4: Getting final status after processing...");
+    const finalLogs = await enhanceCallLogsWithSupabaseStatus(logs);
+
+    const summary = {
+      totalCalls: finalLogs.length,
+      existingTranscriptions: finalLogs.filter((log) => log.existsInSupabase).length,
+      missingTranscriptions: finalLogs.filter(
+        (log) => !log.existsInSupabase && log.recording_location
+      ).length,
+      processedThisRequest: processedCount,
+      errors: errors.length,
+    };
+
+    console.log("🎉 Unified workflow completed:", summary);
+
+    // NEW: Clear processing state on completion
+    clearProcessingState();
+
+    return NextResponse.json({
+      success: true,
+      data: finalLogs,
+      summary,
+      processedContactIds, // NEW: Return processed contact IDs for frontend tracking
+      errors: errors.length > 0 ? errors : undefined,
+      dateRange: dateRange
+        ? {
+            start: dateRange.start.toISOString(),
+            end: dateRange.end.toISOString(),
+          }
+        : null,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("💥 Unified workflow error:", error);
+    
+    // NEW: Clear processing state on error
+    clearProcessingState();
+    
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to process calls",
+        details:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// POST endpoint for processing specific calls
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { contactIds, processTranscriptions = true } = body;
+
+    if (!contactIds || !Array.isArray(contactIds)) {
+      return NextResponse.json(
+        { error: "contactIds array is required" },
+        { status: 400 }
+      );
+    }
+
+    console.log(`🚀 Processing specific calls: ${contactIds.join(", ")}`);
+
+    // Get specific call logs
+    const logs = await getContactLogs();
+    const targetLogs = logs.filter((log) =>
+      contactIds.includes(log.contact_id)
+    );
+
+    if (targetLogs.length === 0) {
+      return NextResponse.json(
+        { error: "No matching call logs found" },
+        { status: 404 }
+      );
+    }
+
+    // Check Supabase status
+    const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(targetLogs);
+    const missingTranscriptions = enhancedLogs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
+    );
+
+    let processedCount = 0;
+    const errors: any[] = [];
+
+    if (processTranscriptions && missingTranscriptions.length > 0) {
+      const apiKey = process.env.ASSEMBLYAI_API_KEY;
+      if (!apiKey) {
+        return NextResponse.json(
+          { error: "AssemblyAI API key not configured" },
+          { status: 500 }
+        );
+      }
+
+      for (const log of missingTranscriptions) {
+        try {
+          console.log(`🔍 Final check for call ${log.contact_id}...`);
+
+          // FIXED: Double-check right before processing each individual call
+          const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
+          if (!stillMissing) {
+            console.log(`⏭️ Call ${log.contact_id} already processed, skipping...`);
+            continue;
+          }
+
+          // NEW: Mark call as being processed
+          markCallAsProcessing(log.contact_id);
+
+          console.log(`🎯 Processing call ${log.contact_id}...`);
+
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
+          const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
+          const transcript = await transcribeAudio(uploadUrl, 2);
+
+          let categorization = null;
+          if (transcript.utterances && transcript.utterances.length > 0) {
+            try {
+              categorization = await performTopicCategorization(transcript);
+            } catch (catError) {
+              console.error("Categorization failed:", catError);
+            }
+
+            transcript.topic_categorization = categorization
+              ? {
+                  primary_topic: categorization.primary_category,
+                  all_topics: categorization.topic_categories,
+                  confidence: categorization.confidence,
+                }
+              : {
+                  primary_topic: "Uncategorised",
+                  all_topics: ["Uncategorised"],
+                  confidence: 0,
+                };
+          }
+
+          // FIXED: Final check before saving
+          const finalCheck = await checkCallExistsInSupabase(log.contact_id);
+          if (finalCheck) {
+            console.log(`⚠️ Call ${log.contact_id} was processed during processing, skipping save...`);
+            unmarkCallAsProcessing(log.contact_id, false);
+            continue;
+          }
+
+          await saveTranscriptionToSupabase(log, transcript, categorization);
+          log.existsInSupabase = true;
+          processedCount++;
+
+          // NEW: Mark as successfully processed
+          unmarkCallAsProcessing(log.contact_id, true);
+
+          console.log(`✅ Successfully processed call ${log.contact_id}`);
+        } catch (error) {
+          console.error(`❌ Error processing call ${log.contact_id}:`, error);
+          
+          // NEW: Unmark as processing on error
+          unmarkCallAsProcessing(log.contact_id, false);
+          
+          errors.push({
+            contact_id: log.contact_id,
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+    }
+
+    // Get final status
+    const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
+
+    // NEW: Clear processing state on completion
+    clearProcessingState();
+
+    return NextResponse.json({
+      success: true,
+      data: finalEnhancedLogs,
+      summary: {
+        requestedCalls: contactIds.length,
+        foundCalls: targetLogs.length,
+        existingTranscriptions: finalEnhancedLogs.filter(
+          (log) => log.existsInSupabase
+        ).length,
+        processedThisRequest: processedCount,
+        errors: errors.length,
+      },
+      errors: errors.length > 0 ? errors : undefined,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error in POST workflow:", error);
+    
+    // NEW: Clear processing state on error
+    clearProcessingState();
+    
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to process specific calls",
+        details:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      { status: 500 }
+    );
+  }
+}

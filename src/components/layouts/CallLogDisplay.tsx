@@ -2,7 +2,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-// import SystemStatus from "./SystemStatus"; // Uncomment to use system status
 
 interface DateRange {
   start: Date;
@@ -10,7 +9,70 @@ interface DateRange {
   label: string;
 }
 
-interface TranscribedCall {
+interface CallLog {
+  contact_id: string;
+  agent_username: string;
+  recording_location: string;
+  initiation_timestamp: string;
+  total_call_time: {
+    minutes: number;
+    seconds: number;
+  };
+  campaign_name: string;
+  campaign_id: number;
+  customer_cli: string;
+  agent_hold_time: number;
+  total_hold_time: number;
+  time_in_queue: number;
+  queue_name: string;
+  disposition_title: string;
+  existsInSupabase?: boolean;
+  transcriptionStatus?: "Transcribed" | "Pending Transcription" | "Failed" | "Processing";
+  transcriptionProgress?: number;
+  transcriptionError?: string;
+  // Supabase fields for transcribed calls
+  transcript_text?: string;
+  call_summary?: string;
+  sentiment_analysis?: string;
+  primary_category?: string;
+  categories?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ProcessingSummary {
+  totalCalls: number;
+  existingTranscriptions: number;
+  missingTranscriptions: number;
+  processedThisRequest: number;
+  errors: number;
+}
+
+interface ProcessingError {
+  contact_id: string;
+  error: string;
+}
+
+// Enhanced job tracking interface
+interface ProcessingJob {
+  id: string;
+  contact_ids: string[];
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress: {
+    total: number;
+    completed: number;
+    failed: number;
+    current_contact_id?: string;
+  };
+  created_at: string;
+  updated_at: string;
+  errors: Array<{
+    contact_id: string;
+    error: string;
+  }>;
+}
+
+interface SupabaseCallRecord {
   contact_id: string;
   agent_username: string;
   transcript_text: string;
@@ -27,131 +89,201 @@ interface TranscribedCall {
   updated_at: string;
 }
 
-interface SummaryStats {
-  totalInDateRange: number;
-  totalFiltered: number;
-  categoryStats: Array<{
-    category: string;
-    count: number;
-  }>;
-  agentStats: Array<{
-    agent: string;
-    count: number;
-  }>;
-}
-
-type SortField = 'agent_username' | 'initiation_timestamp' | 'call_duration' | 'queue_name' | 'disposition_title' | 'primary_category' | 'created_at';
+type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
 type SortDirection = 'asc' | 'desc';
 
-const ITEMS_PER_PAGE = 50;
-const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
+const ITEMS_PER_PAGE = 100;
+const JOB_STATUS_POLL_INTERVAL = 5000; // 5 seconds
+const SUPABASE_REFRESH_INTERVAL = 15000; // 15 seconds
 
 const CallLogDisplay = ({
   selectedDateRange,
+  checkSupabase = true,
 }: {
   selectedDateRange: DateRange | null;
+  checkSupabase?: boolean;
 }) => {
-  const [transcribedCalls, setTranscribedCalls] = useState<TranscribedCall[]>([]);
+  const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+  const [supabaseRecords, setSupabaseRecords] = useState<SupabaseCallRecord[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingSupabase, setLoadingSupabase] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<string | null>(null);
-  const [backgroundProcessingTriggered, setBackgroundProcessingTriggered] = useState(false);
+  
+  // Enhanced processing state
+  const [activeJobs, setActiveJobs] = useState<Map<string, ProcessingJob>>(new Map());
+  const [processingSummary, setProcessingSummary] = useState<ProcessingSummary | null>(null);
+  const [lastSupabaseUpdate, setLastSupabaseUpdate] = useState<string | null>(null);
   
   const [selectedAgent, setSelectedAgent] = useState<string>("all");
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
-  const [sortField, setSortField] = useState<SortField>('created_at');
+  const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
-  const [searchQuery, setSearchQuery] = useState<string>("");
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // Ref for auto-refresh interval
-  const refreshInterval = useRef<NodeJS.Timeout | null>(null);
+  // Refs for tracking and cleanup
+  const jobPollingIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const supabaseRefreshInterval = useRef<NodeJS.Timeout | null>(null);
 
-  // Fetch transcribed calls from Supabase
-  const fetchTranscribedCalls = async (showLoading = true) => {
-    if (showLoading) setLoading(true);
-    setError(null);
-
+  // Fetch all transcribed calls from Supabase
+  const fetchSupabaseRecords = async () => {
+    setLoadingSupabase(true);
     try {
-      console.log('📊 Fetching transcribed calls from Supabase...');
+      console.log('📊 Fetching all transcribed calls from Supabase...');
       
       const response = await fetch('/api/supabase/get-all-transcriptions');
       const data = await response.json();
 
       if (data.success) {
-        setTranscribedCalls(data.data || []);
-        setLastUpdate(new Date().toISOString());
-        console.log(`✅ Loaded ${data.data?.length || 0} transcribed calls`);
+        setSupabaseRecords(data.data || []);
+        setLastSupabaseUpdate(new Date().toISOString());
+        console.log(`✅ Loaded ${data.data?.length || 0} transcribed calls from Supabase`);
       } else {
-        setError(data.error || 'Failed to fetch transcribed calls');
-        console.error('Failed to fetch transcribed calls:', data.error);
+        console.error('Failed to fetch Supabase records:', data.error);
       }
     } catch (err) {
-      setError('Network error occurred while fetching transcribed calls');
-      console.error('Error fetching transcribed calls:', err);
+      console.error('Error fetching Supabase records:', err);
     } finally {
-      if (showLoading) setLoading(false);
+      setLoadingSupabase(false);
     }
   };
 
-  // Filter calls by date range
-  const dateFilteredCalls = useMemo(() => {
-    if (!selectedDateRange) return transcribedCalls;
+  // Check job status
+  const checkJobStatus = async (jobId: string): Promise<ProcessingJob | null> => {
+    try {
+      const response = await fetch(`/api/process-calls?jobId=${jobId}`, {
+        method: 'PUT'
+      });
+      
+      if (!response.ok) {
+        console.error(`Job status check failed: ${response.status}`);
+        return null;
+      }
 
-    return transcribedCalls.filter(call => {
-      const callDate = new Date(call.initiation_timestamp);
-      return callDate >= selectedDateRange.start && callDate <= selectedDateRange.end;
+      const data = await response.json();
+      return data.success ? data.job : null;
+    } catch (error) {
+      console.error(`Error checking job status for ${jobId}:`, error);
+      return null;
+    }
+  };
+
+  // Start polling for job status
+  const startJobPolling = (jobId: string) => {
+    // Clear existing interval if any
+    const existingInterval = jobPollingIntervals.current.get(jobId);
+    if (existingInterval) {
+      clearInterval(existingInterval);
+    }
+
+    const interval = setInterval(async () => {
+      const jobStatus = await checkJobStatus(jobId);
+      
+      if (jobStatus) {
+        setActiveJobs(prev => {
+          const newMap = new Map(prev);
+          newMap.set(jobId, jobStatus);
+          return newMap;
+        });
+
+        // If job is completed or failed, stop polling and refresh data
+        if (jobStatus.status === 'completed' || jobStatus.status === 'failed') {
+          clearInterval(interval);
+          jobPollingIntervals.current.delete(jobId);
+          
+          // Refresh Supabase data to get newly transcribed calls
+          await fetchSupabaseRecords();
+          
+          // Remove job from active jobs after a delay
+          setTimeout(() => {
+            setActiveJobs(prev => {
+              const newMap = new Map(prev);
+              newMap.delete(jobId);
+              return newMap;
+            });
+          }, 5000);
+
+          console.log(`✅ Job ${jobId} ${jobStatus.status}. Polling stopped.`);
+        }
+      } else {
+        // Job not found, stop polling
+        clearInterval(interval);
+        jobPollingIntervals.current.delete(jobId);
+        setActiveJobs(prev => {
+          const newMap = new Map(prev);
+          newMap.delete(jobId);
+          return newMap;
+        });
+      }
+    }, JOB_STATUS_POLL_INTERVAL);
+
+    jobPollingIntervals.current.set(jobId, interval);
+  };
+
+  // Merge call logs with Supabase records and job status
+  const mergedCallLogs = useMemo(() => {
+    if (callLogs.length === 0) return [];
+
+    const supabaseMap = new Map(supabaseRecords.map(record => [record.contact_id, record]));
+    
+    // Get currently processing contact IDs from active jobs
+    const processingContactIds = new Set<string>();
+    activeJobs.forEach(job => {
+      if (job.status === 'processing' || job.status === 'queued') {
+        job.contact_ids.forEach(id => processingContactIds.add(id));
+      }
     });
-  }, [transcribedCalls, selectedDateRange]);
+    
+    return callLogs.map(log => {
+      const supabaseRecord = supabaseMap.get(log.contact_id);
+      
+      if (supabaseRecord) {
+        // Merge with Supabase data
+        return {
+          ...log,
+          existsInSupabase: true,
+          transcriptionStatus: "Transcribed" as const,
+          transcript_text: supabaseRecord.transcript_text,
+          call_summary: supabaseRecord.call_summary,
+          sentiment_analysis: supabaseRecord.sentiment_analysis,
+          primary_category: supabaseRecord.primary_category,
+          categories: supabaseRecord.categories,
+          created_at: supabaseRecord.created_at,
+          updated_at: supabaseRecord.updated_at,
+        };
+      } else if (processingContactIds.has(log.contact_id)) {
+        // Call is being processed
+        return {
+          ...log,
+          existsInSupabase: false,
+          transcriptionStatus: "Processing" as const,
+        };
+      } else {
+        // Call log without transcription
+        return {
+          ...log,
+          existsInSupabase: false,
+          transcriptionStatus: "Pending Transcription" as const,
+        };
+      }
+    });
+  }, [callLogs, supabaseRecords, activeJobs]);
 
-  // Get unique agents from filtered data
+  // Get unique agents from merged data
   const uniqueAgents = useMemo(() => {
-    const agents = Array.from(new Set(dateFilteredCalls.map(call => call.agent_username)))
+    const agents = Array.from(new Set(mergedCallLogs.map(log => log.agent_username)))
       .filter(agent => agent && agent.trim() !== "")
       .sort();
     return agents;
-  }, [dateFilteredCalls]);
+  }, [mergedCallLogs]);
 
-  // Get unique categories from filtered data
-  const uniqueCategories = useMemo(() => {
-    const categories = Array.from(new Set(
-      dateFilteredCalls
-        .map(call => call.primary_category)
-        .filter(category => category && category.trim() !== "")
-    )).sort();
-    return categories;
-  }, [dateFilteredCalls]);
-
-  // Filter, search, and sort calls
-  const filteredAndSortedCalls = useMemo(() => {
-    let filtered = dateFilteredCalls;
+  // Filter and sort merged call logs
+  const filteredAndSortedCallLogs = useMemo(() => {
+    let filtered = mergedCallLogs;
     
-    // Agent filter
     if (selectedAgent !== "all") {
-      filtered = filtered.filter(call => call.agent_username === selectedAgent);
+      filtered = mergedCallLogs.filter(log => log.agent_username === selectedAgent);
     }
     
-    // Category filter
-    if (selectedCategory !== "all") {
-      filtered = filtered.filter(call => call.primary_category === selectedCategory);
-    }
-    
-    // Search filter
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(call => 
-        call.agent_username?.toLowerCase().includes(query) ||
-        call.primary_category?.toLowerCase().includes(query) ||
-        call.queue_name?.toLowerCase().includes(query) ||
-        call.disposition_title?.toLowerCase().includes(query) ||
-        call.transcript_text?.toLowerCase().includes(query) ||
-        call.call_summary?.toLowerCase().includes(query) ||
-        call.contact_id.toLowerCase().includes(query)
-      );
-    }
-    
-    // Sort
     return filtered.sort((a, b) => {
       let aValue: any, bValue: any;
       
@@ -164,12 +296,9 @@ const CallLogDisplay = ({
           aValue = new Date(a.initiation_timestamp).getTime();
           bValue = new Date(b.initiation_timestamp).getTime();
           break;
-        case 'call_duration':
-          // Parse call_duration JSON if it exists
-          const aDuration = a.call_duration ? JSON.parse(a.call_duration) : { minutes: 0, seconds: 0 };
-          const bDuration = b.call_duration ? JSON.parse(b.call_duration) : { minutes: 0, seconds: 0 };
-          aValue = (aDuration.minutes || 0) * 60 + (aDuration.seconds || 0);
-          bValue = (bDuration.minutes || 0) * 60 + (bDuration.seconds || 0);
+        case 'total_call_time':
+          aValue = (a.total_call_time?.minutes || 0) * 60 + (a.total_call_time?.seconds || 0);
+          bValue = (b.total_call_time?.minutes || 0) * 60 + (b.total_call_time?.seconds || 0);
           break;
         case 'queue_name':
           aValue = a.queue_name || '';
@@ -179,14 +308,6 @@ const CallLogDisplay = ({
           aValue = a.disposition_title || '';
           bValue = b.disposition_title || '';
           break;
-        case 'primary_category':
-          aValue = a.primary_category || '';
-          bValue = b.primary_category || '';
-          break;
-        case 'created_at':
-          aValue = new Date(a.created_at).getTime();
-          bValue = new Date(b.created_at).getTime();
-          break;
         default:
           return 0;
       }
@@ -195,40 +316,38 @@ const CallLogDisplay = ({
       if (aValue > bValue) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [dateFilteredCalls, selectedAgent, selectedCategory, searchQuery, sortField, sortDirection]);
+  }, [mergedCallLogs, selectedAgent, sortField, sortDirection]);
 
   // Pagination calculations
-  const totalPages = Math.ceil(filteredAndSortedCalls.length / ITEMS_PER_PAGE);
-  const paginatedCalls = useMemo(() => {
+  const totalPages = Math.ceil(filteredAndSortedCallLogs.length / ITEMS_PER_PAGE);
+  const paginatedCallLogs = useMemo(() => {
     const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
     const endIndex = startIndex + ITEMS_PER_PAGE;
-    return filteredAndSortedCalls.slice(startIndex, endIndex);
-  }, [filteredAndSortedCalls, currentPage]);
+    return filteredAndSortedCallLogs.slice(startIndex, endIndex);
+  }, [filteredAndSortedCallLogs, currentPage]);
 
-  // Summary statistics
-  const summaryStats = useMemo(() => {
-    const totalInDateRange = dateFilteredCalls.length;
-    const totalFiltered = filteredAndSortedCalls.length;
+  // Calculate processing summary from merged data and active jobs
+  const calculatedSummary = useMemo(() => {
+    const total = mergedCallLogs.length;
+    const transcribed = mergedCallLogs.filter(log => log.existsInSupabase).length;
+    const missing = mergedCallLogs.filter(log => !log.existsInSupabase && log.recording_location).length;
     
-    // Category breakdown
-    const categoryStats = uniqueCategories.map(category => ({
-      category,
-      count: dateFilteredCalls.filter(call => call.primary_category === category).length
-    }));
-
-    // Agent breakdown  
-    const agentStats = uniqueAgents.map(agent => ({
-      agent,
-      count: dateFilteredCalls.filter(call => call.agent_username === agent).length
-    }));
-
+    // Calculate totals from active jobs
+    let totalProcessed = 0;
+    let totalFailed = 0;
+    activeJobs.forEach(job => {
+      totalProcessed += job.progress.completed;
+      totalFailed += job.progress.failed;
+    });
+    
     return {
-      totalInDateRange,
-      totalFiltered,
-      categoryStats,
-      agentStats
+      totalCalls: total,
+      existingTranscriptions: transcribed,
+      missingTranscriptions: missing,
+      processedThisRequest: totalProcessed,
+      errors: totalFailed
     };
-  }, [dateFilteredCalls, filteredAndSortedCalls, uniqueCategories, uniqueAgents]);
+  }, [mergedCallLogs, activeJobs]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -239,14 +358,14 @@ const CallLogDisplay = ({
     }
   };
 
-  // Audio download function
-  const handleAudioDownload = async (call: TranscribedCall) => {
-    if (!call.recording_location) {
+  // Audio download function (unchanged)
+  const handleAudioDownload = async (log: CallLog) => {
+    if (!log.recording_location) {
       alert("No audio file available for this call");
       return;
     }
 
-    const contactId = call.contact_id;
+    const contactId = log.contact_id;
     
     if (downloadingAudio.includes(contactId)) return;
 
@@ -255,7 +374,7 @@ const CallLogDisplay = ({
     try {
       console.log(`🎵 Downloading call recording: ${contactId}`);
 
-      const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(call.recording_location)}`;
+      const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
       
       const response = await fetch(downloadUrl);
 
@@ -275,7 +394,7 @@ const CallLogDisplay = ({
       const a = document.createElement('a');
       a.style.display = 'none';
       a.href = url;
-      a.download = call.recording_location.split('/').pop() || `call_${contactId}.wav`;
+      a.download = log.recording_location.split('/').pop() || `call_${contactId}.wav`;
       
       document.body.appendChild(a);
       a.click();
@@ -293,90 +412,210 @@ const CallLogDisplay = ({
     }
   };
 
-  // Reset filters when date range changes
+  // Manual processing trigger
+  const startProcessing = async () => {
+    if (!selectedDateRange) return;
+
+    try {
+      const params = new URLSearchParams({
+        startDate: selectedDateRange.start.toISOString(),
+        endDate: selectedDateRange.end.toISOString(),
+        processTranscriptions: 'true',
+        maxProcessCount: '5',
+      });
+
+      const response = await fetch(`/api/process-calls?${params}`);
+      const data = await response.json();
+
+      if (data.success && data.jobId) {
+        console.log(`🚀 Started processing job: ${data.jobId}`);
+        
+        // Add job to active jobs and start polling
+        setActiveJobs(prev => {
+          const newMap = new Map(prev);
+          newMap.set(data.jobId, {
+            id: data.jobId,
+            contact_ids: [],
+            status: 'queued',
+            progress: { total: 0, completed: 0, failed: 0 },
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            errors: []
+          });
+          return newMap;
+        });
+        
+        startJobPolling(data.jobId);
+      } else {
+        console.error('Failed to start processing:', data.error);
+        setError(data.error || 'Failed to start processing');
+      }
+    } catch (err) {
+      console.error('Error starting processing:', err);
+      setError('Network error occurred while starting processing');
+    }
+  };
+
+  // Reset filters when data changes
   useEffect(() => {
     setSelectedAgent("all");
-    setSelectedCategory("all");
-    setSearchQuery("");
     setCurrentPage(1);
-    setBackgroundProcessingTriggered(false);
   }, [selectedDateRange]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedAgent, selectedCategory, searchQuery, sortField, sortDirection]);
+  }, [selectedAgent, sortField, sortDirection]);
 
-  // Auto-trigger background processing for missing transcriptions
-  const triggerBackgroundProcessing = async (dateRange: DateRange) => {
-    try {
-      console.log('🎯 Auto-triggering background processing for date range...');
-      setBackgroundProcessingTriggered(true);
-      
-      const response = await fetch('/api/auto-process', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          startDate: dateRange.start.toISOString(),
-          endDate: dateRange.end.toISOString(),
-        }),
-      });
-
-      const data = await response.json();
-      
-      if (data.success) {
-        console.log('✅ Background processing auto-triggered');
-      } else {
-        console.log('⚠️ Auto-trigger response:', data);
-      }
-    } catch (error) {
-      console.error('❌ Failed to auto-trigger background processing:', error);
-      // Don't show error to user since this is background functionality
-    }
-  };
-
-  // Setup auto-refresh and auto-trigger
+  // Setup Supabase refresh interval
   useEffect(() => {
-    // Initial fetch
-    fetchTranscribedCalls();
+    if (!selectedDateRange) return;
 
-    // Auto-trigger background processing if date range is selected
-    if (selectedDateRange) {
-      triggerBackgroundProcessing(selectedDateRange);
+    // Clear existing interval
+    if (supabaseRefreshInterval.current) {
+      clearInterval(supabaseRefreshInterval.current);
     }
 
-    // Setup auto-refresh interval
-    refreshInterval.current = setInterval(() => {
-      console.log('🔄 Auto-refreshing transcribed calls...');
-      fetchTranscribedCalls(false); // Don't show loading spinner for auto-refresh
-    }, AUTO_REFRESH_INTERVAL);
+    // Setup new interval for Supabase updates
+    supabaseRefreshInterval.current = setInterval(() => {
+      console.log('🔄 Periodic Supabase refresh...');
+      fetchSupabaseRecords();
+    }, SUPABASE_REFRESH_INTERVAL);
 
-    // Cleanup on unmount
+    // Cleanup on unmount or date range change
     return () => {
-      if (refreshInterval.current) {
-        clearInterval(refreshInterval.current);
-        refreshInterval.current = null;
+      if (supabaseRefreshInterval.current) {
+        clearInterval(supabaseRefreshInterval.current);
+        supabaseRefreshInterval.current = null;
       }
     };
-  }, [selectedDateRange]); // Add selectedDateRange as dependency
+  }, [selectedDateRange]);
+
+  // Cleanup job polling on unmount
+  useEffect(() => {
+    return () => {
+      jobPollingIntervals.current.forEach((interval) => {
+        clearInterval(interval);
+      });
+      jobPollingIntervals.current.clear();
+      
+      if (supabaseRefreshInterval.current) {
+        clearInterval(supabaseRefreshInterval.current);
+      }
+    };
+  }, []);
+
+  // Fetch call logs and automatically start processing
+  useEffect(() => {
+    const fetchCallLogs = async () => {
+      if (!selectedDateRange) return;
+
+      setLoading(true);
+      setError(null);
+      setProcessingSummary(null);
+
+      try {
+        // Step 1: Fetch Supabase records first
+        console.log('🔍 Step 1: Fetching Supabase transcriptions...');
+        await fetchSupabaseRecords();
+
+        // Step 2: Fetch call logs and auto-start processing
+        console.log('📊 Step 2: Fetching call logs and starting processing...');
+        const params = new URLSearchParams({
+          startDate: selectedDateRange.start.toISOString(),
+          endDate: selectedDateRange.end.toISOString(),
+          processTranscriptions: 'true', // Auto-start processing
+          maxProcessCount: '5',
+        });
+
+        const response = await fetch(`/api/process-calls?${params}`);
+        const data = await response.json();
+
+        if (data.success) {
+          setCallLogs(data.data || []);
+          console.log('📋 Call logs loaded:', data.summary);
+
+          // If processing job was created, start polling
+          if (data.jobId && data.processing) {
+            console.log(`🎯 Auto-started processing job: ${data.jobId}`);
+            
+            setActiveJobs(prev => {
+              const newMap = new Map(prev);
+              newMap.set(data.jobId, {
+                id: data.jobId,
+                contact_ids: [],
+                status: 'queued',
+                progress: { total: 0, completed: 0, failed: 0 },
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                errors: []
+              });
+              return newMap;
+            });
+            
+            startJobPolling(data.jobId);
+          }
+        } else {
+          setError(data.error || "Failed to fetch call logs");
+        }
+      } catch (err) {
+        setError("Network error occurred while fetching call logs");
+        console.error("Error fetching call logs:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchCallLogs();
+  }, [selectedDateRange, checkSupabase]);
+
+  // Get transcription status with enhanced info
+  const getTranscriptionStatus = (log: CallLog) => {
+    if (log.existsInSupabase) {
+      return (
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800"
+              title={`Transcribed: ${log.transcript_text ? log.transcript_text.substring(0, 100) + '...' : 'No preview'}`}>
+          <div className="w-2 h-2 bg-green-500 rounded-full mr-1"></div>
+          Transcribed
+          {log.primary_category && (
+            <span className="ml-1 text-green-600">({log.primary_category})</span>
+          )}
+        </span>
+      );
+    } else if (log.transcriptionStatus === "Processing") {
+      return (
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+          <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
+          Processing
+        </span>
+      );
+    } else if (log.transcriptionStatus === "Failed") {
+      return (
+        <span 
+          className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800 cursor-help"
+          title={log.transcriptionError || "Transcription failed"}
+        >
+          <div className="w-2 h-2 bg-red-500 rounded-full mr-1"></div>
+          Failed
+        </span>
+      );
+    } else {
+      return (
+        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          <div className="w-2 h-2 bg-gray-500 rounded-full mr-1"></div>
+          Pending
+        </span>
+      );
+    }
+  };
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
   };
 
-  const formatCallDuration = (callDurationJson?: any) => {
-    if (!callDurationJson) return "N/A";
-    
-    try {
-      const duration = typeof callDurationJson === 'string' 
-        ? JSON.parse(callDurationJson) 
-        : callDurationJson;
-      const { minutes = 0, seconds = 0 } = duration;
-      return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-    } catch {
-      return "N/A";
-    }
+  const formatCallDuration = (totalCallTime: { minutes: number; seconds: number }) => {
+    if (!totalCallTime) return "N/A";
+    const { minutes = 0, seconds = 0 } = totalCallTime;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   };
 
   const getSortIcon = (field: SortField) => {
@@ -384,217 +623,166 @@ const CallLogDisplay = ({
     return sortDirection === 'asc' ? '↑' : '↓';
   };
 
-  const getCategoryBadgeColor = (category?: string) => {
-    if (!category) return "bg-gray-100 text-gray-800";
-    
-    const colors = {
-      "Customer Service": "bg-blue-100 text-blue-800",
-      "Sales": "bg-green-100 text-green-800",
-      "Support": "bg-yellow-100 text-yellow-800",
-      "Complaint": "bg-red-100 text-red-800",
-      "Inquiry": "bg-purple-100 text-purple-800",
-      "Follow-up": "bg-indigo-100 text-indigo-800",
-      "Uncategorised": "bg-gray-100 text-gray-800"
-    };
-    
-    return colors[category as keyof typeof colors] || "bg-teal-100 text-teal-800";
-  };
-
   return (
-    <div className="flex-1 border-2 p-4 rounded border-border bg-bg-secondary">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h5 className="text-[#4ecca3] text-xl font-semibold">Transcribed Call Logs</h5>
-          <p className="text-gray-400 text-sm mt-1">
-            Automatically processed and transcribed calls
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {lastUpdate && (
+    <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
+      <div className="flex items-center justify-between mb-4">
+        <h5 className="text-[#4ecca3]">Call Logs & Transcriptions</h5>
+        <div className="flex items-center gap-2">
+          {lastSupabaseUpdate && (
             <div className="text-xs text-gray-400">
-              Last updated: {new Date(lastUpdate).toLocaleTimeString()}
+              Last updated: {new Date(lastSupabaseUpdate).toLocaleTimeString()}
             </div>
           )}
-          
-          {/* Uncomment to add system status indicator
-          <SystemStatus />
-          */}
-          
-          <button
-            onClick={() => fetchTranscribedCalls()}
-            disabled={loading}
-            className={`px-3 py-2 rounded-lg transition-colors text-sm font-medium disabled:opacity-50 ${
-              backgroundProcessingTriggered 
-                ? 'bg-blue-600 text-white hover:bg-blue-700' 
-                : 'bg-blue-600 text-white hover:bg-blue-700'
-            }`}
-          >
-            {loading ? '🔄 Refreshing...' : '🔄 Refresh'}
-            {backgroundProcessingTriggered && !loading && (
-              <span className="ml-1 w-2 h-2 bg-blue-300 rounded-full inline-block animate-pulse"></span>
-            )}
-          </button>
           <Link
             href="/tge/overview"
             className="px-3 py-2 bg-[#4ecca3] text-[#0a101b] rounded-lg hover:bg-[#3bb891] transition-colors text-sm font-medium"
           >
-            📊 Analytics Overview
+            View All Transcribed Calls
           </Link>
         </div>
       </div>
 
       {!selectedDateRange ? (
-        <div className="text-center py-12">
-          <div className="text-gray-500 text-lg">Please Select A Date Range</div>
-          <div className="text-gray-400 text-sm mt-2">
-            Choose a date range to view transcribed calls from that period
-          </div>
-        </div>
+        <div>Please Select A Date Range</div>
       ) : (
         <div>
-          {/* Background Processing Notification */}
-          {backgroundProcessingTriggered && (
-            <div className="mb-6 p-4 bg-blue-900 border border-blue-600 rounded-lg">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <div className="w-3 h-3 bg-blue-400 rounded-full mr-3 animate-pulse"></div>
-                  <div>
+          <div className="mb-4">
+            <h6 className="text-sm text-white">
+              Call Data for {selectedDateRange.label}
+              {loadingSupabase && (
+                <span className="ml-2 text-xs text-yellow-400">🔄 Refreshing transcriptions...</span>
+              )}
+            </h6>
+          </div>
+
+          {/* Active Jobs Status */}
+          {activeJobs.size > 0 && (
+            <div className="mb-4 space-y-2">
+              {Array.from(activeJobs.values()).map(job => (
+                <div key={job.id} className="p-4 bg-blue-900 border border-blue-600 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
                     <div className="text-sm text-blue-300 font-medium">
-                      🤖 Background Processing Active
+                      🤖 Background Processing Job: {job.id}
                     </div>
-                    <div className="text-xs text-blue-200 mt-1">
-                      Automatically transcribing calls for {selectedDateRange.label}. New transcriptions will appear here as they complete.
+                    <div className="text-xs text-blue-200">
+                      Status: <span className="font-medium text-white">{job.status}</span>
                     </div>
                   </div>
+                  
+                  {job.progress.total > 0 && (
+                    <>
+                      <div className="grid grid-cols-3 gap-2 text-xs text-blue-200 mb-2">
+                        <div>Completed: <span className="text-green-400 font-medium">{job.progress.completed}</span></div>
+                        <div>Failed: <span className="text-red-400 font-medium">{job.progress.failed}</span></div>
+                        <div>Total: <span className="text-white font-medium">{job.progress.total}</span></div>
+                      </div>
+                      
+                      <div className="mb-2">
+                        <div className="w-full bg-blue-800 rounded-full h-2">
+                          <div 
+                            className="bg-blue-400 h-2 rounded-full transition-all duration-500" 
+                            style={{ 
+                              width: `${((job.progress.completed + job.progress.failed) / job.progress.total) * 100}%` 
+                            }}
+                          ></div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  
+                  {job.progress.current_contact_id && (
+                    <div className="text-xs text-blue-300">
+                      Currently processing: <span className="font-mono text-white">{job.progress.current_contact_id}</span>
+                    </div>
+                  )}
+                  
+                  {job.errors.length > 0 && (
+                    <div className="mt-2 text-xs text-red-300">
+                      Errors: {job.errors.length} (hover to see details)
+                      <div className="mt-1 max-h-16 overflow-y-auto" title={job.errors.map(e => `${e.contact_id}: ${e.error}`).join('\n')}>
+                        {job.errors.slice(0, 3).map((err, idx) => (
+                          <div key={idx} className="text-red-200">• {err.contact_id}: {err.error.substring(0, 50)}...</div>
+                        ))}
+                        {job.errors.length > 3 && <div>... and {job.errors.length - 3} more</div>}
+                      </div>
+                    </div>
+                  )}
                 </div>
+              ))}
+            </div>
+          )}
+
+          {/* Enhanced Processing Summary */}
+          <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm text-[#4ecca3] font-medium">📊 Live Processing Summary</div>
+              <div className="flex gap-2">
                 <button
-                  onClick={() => setBackgroundProcessingTriggered(false)}
-                  className="text-blue-300 hover:text-blue-100 text-lg"
-                  title="Dismiss notification"
+                  onClick={fetchSupabaseRecords}
+                  className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
                 >
-                  ✕
+                  🔄 Refresh Data
                 </button>
+                {calculatedSummary.missingTranscriptions > 0 && activeJobs.size === 0 && (
+                  <button
+                    onClick={startProcessing}
+                    className="px-2 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700"
+                  >
+                    🚀 Start Processing
+                  </button>
+                )}
               </div>
             </div>
-          )}
-
-          {/* Summary Statistics */}
-          {summaryStats.totalInDateRange > 0 && (
-            <div className="mb-6 p-4 bg-bg-primary border border-border rounded-lg">
-              <div className="text-sm text-[#4ecca3] font-medium mb-3">
-                📊 Summary for {selectedDateRange.label}
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-white">{summaryStats.totalInDateRange}</div>
-                  <div className="text-gray-400">Total Transcribed</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-white">{uniqueAgents.length}</div>
-                  <div className="text-gray-400">Agents</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-white">{uniqueCategories.length}</div>
-                  <div className="text-gray-400">Categories</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-white">{summaryStats.totalFiltered}</div>
-                  <div className="text-gray-400">Filtered Results</div>
-                </div>
-              </div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
+              <div>Total Calls: <span className="text-white font-medium">{calculatedSummary.totalCalls}</span></div>
+              <div>Transcribed: <span className="text-green-400 font-medium">{calculatedSummary.existingTranscriptions}</span></div>
+              <div>Missing: <span className="text-yellow-400 font-medium">{calculatedSummary.missingTranscriptions}</span></div>
+              <div>Processed: <span className="text-blue-400 font-medium">{calculatedSummary.processedThisRequest}</span></div>
+              <div>Errors: <span className="text-red-400 font-medium">{calculatedSummary.errors}</span></div>
             </div>
-          )}
+          </div>
 
-          {/* Filters */}
-          <div className="mb-6 grid grid-cols-1 md:grid-cols-4 gap-4">
-            {/* Search */}
-            <div>
+          {/* Enhanced Agent Filter */}
+          {uniqueAgents.length > 0 && (
+            <div className="mb-4">
               <label className="block text-sm font-medium text-white mb-2">
-                🔍 Search:
-              </label>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search calls, agents, categories..."
-                className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#4ecca3] focus:border-transparent"
-              />
-            </div>
-
-            {/* Agent Filter */}
-            <div>
-              <label className="block text-sm font-medium text-white mb-2">
-                👤 Agent:
+                Filter by Agent:
               </label>
               <select
                 value={selectedAgent}
                 onChange={(e) => setSelectedAgent(e.target.value)}
-                className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[#4ecca3] focus:border-transparent"
+                className="px-3 py-2 bg-bg-primary border border-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[#4ecca3] focus:border-transparent"
               >
-                <option value="all">All Agents ({summaryStats.totalInDateRange})</option>
+                <option value="all">All Agents ({mergedCallLogs.length} calls)</option>
                 {uniqueAgents.map((agent) => {
-                  const count = summaryStats.agentStats.find(s => s.agent === agent)?.count || 0;
+                  const agentCallCount = mergedCallLogs.filter(log => log.agent_username === agent).length;
+                  const transcribedCount = mergedCallLogs.filter(log => log.agent_username === agent && log.existsInSupabase).length;
                   return (
                     <option key={agent} value={agent}>
-                      {agent} ({count})
+                      {agent} ({agentCallCount} calls, {transcribedCount} transcribed)
                     </option>
                   );
                 })}
               </select>
             </div>
+          )}
 
-            {/* Category Filter */}
-            <div>
-              <label className="block text-sm font-medium text-white mb-2">
-                🏷️ Category:
-              </label>
-              <select
-                value={selectedCategory}
-                onChange={(e) => setSelectedCategory(e.target.value)}
-                className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[#4ecca3] focus:border-transparent"
-              >
-                <option value="all">All Categories ({summaryStats.totalInDateRange})</option>
-                {uniqueCategories.map((category) => {
-                  const count = summaryStats.categoryStats.find(s => s.category === category)?.count || 0;
-                  return (
-                    <option key={category} value={category}>
-                      {category} ({count})
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-
-            {/* Clear Filters */}
-            <div className="flex items-end">
-              <button
-                onClick={() => {
-                  setSelectedAgent("all");
-                  setSelectedCategory("all");
-                  setSearchQuery("");
-                  setCurrentPage(1);
-                }}
-                className="w-full px-3 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors text-sm font-medium"
-              >
-                🧹 Clear Filters
-              </button>
-            </div>
-          </div>
-
-          {loading && (
-            <div className="flex items-center justify-center p-12">
-              <div className="text-gray-500 text-lg">
-                📊 Loading transcribed calls...
+          {(loading || loadingSupabase) && (
+            <div className="flex items-center justify-center p-8">
+              <div className="text-gray-500">
+                {loading && loadingSupabase ? "📊 Loading call logs and transcriptions..." : 
+                 loading ? "📊 Loading call logs..." : 
+                 "🔍 Fetching transcriptions from Supabase..."}
               </div>
             </div>
           )}
 
           {error && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6 flex items-center justify-between">
-              <span>Error: {error}</span>
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+              Error: {error}
               <button 
                 onClick={() => setError(null)}
-                className="ml-2 text-red-500 hover:text-red-700 font-bold"
+                className="ml-2 text-red-500 hover:text-red-700"
               >
                 ✕
               </button>
@@ -605,11 +793,10 @@ const CallLogDisplay = ({
             <div>
               <div className="mb-4 flex justify-between items-center">
                 <div className="text-sm text-white">
-                  Showing {paginatedCalls.length} of {filteredAndSortedCalls.length} transcribed calls
-                  {filteredAndSortedCalls.length !== summaryStats.totalInDateRange && 
-                    ` (${summaryStats.totalInDateRange} total in date range)`
+                  {selectedAgent === "all" 
+                    ? `Found ${filteredAndSortedCallLogs.length} call(s) - Page ${currentPage} of ${totalPages} (showing ${paginatedCallLogs.length} records)` 
+                    : `Showing ${filteredAndSortedCallLogs.length} call(s) for ${selectedAgent} - Page ${currentPage} of ${totalPages} (${paginatedCallLogs.length} records) - ${mergedCallLogs.length} total calls`
                   }
-                  {totalPages > 1 && ` - Page ${currentPage} of ${totalPages}`}
                 </div>
                 
                 {/* Pagination Controls */}
@@ -650,34 +837,16 @@ const CallLogDisplay = ({
                 )}
               </div>
 
-              {filteredAndSortedCalls.length === 0 ? (
-                <div className="text-center py-12">
-                  <div className="text-gray-500 text-lg">
-                    {summaryStats.totalInDateRange === 0 
-                      ? "No transcribed calls found for this date range" 
-                      : "No calls match your current filters"
-                    }
-                  </div>
-                  <div className="text-gray-400 text-sm mt-2">
-                    {summaryStats.totalInDateRange === 0
-                      ? (backgroundProcessingTriggered 
-                          ? "Background transcription is processing calls automatically. Check back in a few minutes." 
-                          : "Calls may still be processing. Transcription happens automatically in the background.")
-                      : "Try adjusting your search terms or filters"
-                    }
-                  </div>
-                  {summaryStats.totalInDateRange === 0 && (
-                    <button
-                      onClick={() => fetchTranscribedCalls()}
-                      className="mt-4 px-4 py-2 bg-[#4ecca3] text-[#0a101b] rounded-lg hover:bg-[#3bb891] transition-colors text-sm font-medium"
-                    >
-                      🔄 Check for New Transcriptions
-                    </button>
-                  )}
+              {filteredAndSortedCallLogs.length === 0 ? (
+                <div className="text-gray-500 p-4 text-center">
+                  {selectedAgent === "all" 
+                    ? "No call logs found for this date range"
+                    : `No call logs found for agent ${selectedAgent} in this date range`
+                  }
                 </div>
               ) : (
                 <div className="overflow-hidden border border-border rounded-lg">
-                  <div className="overflow-x-auto max-h-[calc(100vh-500px)]">
+                  <div className="overflow-x-auto max-h-[calc(100vh-420px)]">
                     <table className="min-w-full bg-bg-primary">
                       <thead className="bg-bg-secondary border-b border-border sticky top-0 z-10">
                         <tr>
@@ -695,9 +864,9 @@ const CallLogDisplay = ({
                           </th>
                           <th 
                             className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('call_duration')}
+                            onClick={() => handleSort('total_call_time')}
                           >
-                            Duration {getSortIcon('call_duration')}
+                            Duration {getSortIcon('total_call_time')}
                           </th>
                           <th 
                             className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
@@ -707,15 +876,12 @@ const CallLogDisplay = ({
                           </th>
                           <th 
                             className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('primary_category')}
+                            onClick={() => handleSort('disposition_title')}
                           >
-                            Category {getSortIcon('primary_category')}
+                            Disposition {getSortIcon('disposition_title')}
                           </th>
-                          <th 
-                            className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider cursor-pointer hover:bg-gray-700 transition-colors"
-                            onClick={() => handleSort('created_at')}
-                          >
-                            Transcribed {getSortIcon('created_at')}
+                          <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
+                            Transcription Status
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-white uppercase tracking-wider">
                             Actions
@@ -723,48 +889,46 @@ const CallLogDisplay = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border">
-                        {paginatedCalls.map((call) => (
+                        {paginatedCallLogs.map((log, index) => (
                           <tr 
-                            key={call.contact_id}
-                            className="hover:bg-gray-800 transition-colors bg-green-900/10"
+                            key={log.contact_id || index}
+                            className={`hover:bg-gray-800 transition-colors ${log.existsInSupabase ? 'bg-green-900/20' : ''}`}
                           >
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {call.agent_username}
+                              {log.agent_username}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {formatTimestamp(call.initiation_timestamp)}
+                              {formatTimestamp(log.initiation_timestamp)}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {formatCallDuration(call.call_duration)}
+                              {formatCallDuration(log.total_call_time)}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
-                              {call.queue_name || "N/A"}
+                              {log.queue_name || "N/A"}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-[#4ecca3]">
+                              {log.disposition_title || "N/A"}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm">
-                              <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${getCategoryBadgeColor(call.primary_category)}`}>
-                                {call.primary_category || "Uncategorised"}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-400">
-                              {formatTimestamp(call.created_at)}
+                              {getTranscriptionStatus(log)}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm">
                               <div className="flex items-center space-x-2">
                                 <Link 
-                                  href={`/tge/${call.contact_id}`}
+                                  href={`/tge/${log.contact_id}`}
                                   className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-[#4ecca3] hover:bg-[#3bb891] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#4ecca3] transition-colors"
                                 >
-                                  📄 View Transcript
+                                  {log.existsInSupabase ? 'View Transcript' : 'View Details'}
                                 </Link>
                                 
-                                {call.recording_location && (
+                                {log.recording_location && (
                                   <button
-                                    onClick={() => handleAudioDownload(call)}
-                                    disabled={downloadingAudio.includes(call.contact_id)}
+                                    onClick={() => handleAudioDownload(log)}
+                                    disabled={downloadingAudio.includes(log.contact_id)}
                                     className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors"
                                     title="Download audio file"
                                   >
-                                    {downloadingAudio.includes(call.contact_id) ? (
+                                    {downloadingAudio.includes(log.contact_id) ? (
                                       <>
                                         <svg className="animate-spin -ml-1 mr-1 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -774,7 +938,10 @@ const CallLogDisplay = ({
                                       </>
                                     ) : (
                                       <>
-                                        🎵 Audio
+                                        <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                        Audio
                                       </>
                                     )}
                                   </button>

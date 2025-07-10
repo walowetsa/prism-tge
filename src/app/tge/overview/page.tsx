@@ -561,10 +561,9 @@ const dispositionData = Object.entries(dispositionBreakdown)
     const ahtData = Array.from({ length: 24 }, (_, hour) => {
       const data = ahtByHour[hour];
       const avgSeconds = data ? data.totalDuration / data.callCount : 0;
-      const avgMinutes = avgSeconds / 60;
       return {
         hour: `${hour.toString().padStart(2, "0")}:00`,
-        aht: Math.round(avgMinutes * 100) / 100, // Round to 2 decimal places
+        aht: Math.round(avgSeconds), // Display as seconds
         calls: data?.callCount || 0,
       };
     }).filter((item) => item.calls > 0);
@@ -589,10 +588,8 @@ const stats = useMemo(() => {
     return sum + (duration.minutes * 60) + duration.seconds;
   }, 0);
 
-  // Calculate average duration and format properly
+  // Calculate average duration and format as seconds only
   const avgDurationSeconds = totalCalls > 0 ? totalDurationSeconds / totalCalls : 0;
-  const avgMinutes = Math.floor(avgDurationSeconds / 60);
-  const avgSeconds = Math.floor(avgDurationSeconds % 60);
 
   // Additional stats
   const callsWithTranscripts = filteredCalls.filter(
@@ -613,7 +610,7 @@ const stats = useMemo(() => {
 
   return {
     totalCalls,
-    avgDuration: `${avgMinutes}:${avgSeconds.toString().padStart(2, "0")}`,
+    avgDuration: Math.round(avgDurationSeconds), // Display as seconds only
     totalSentiments: analyticsData.totalSentiments,
     transcriptCoverage,
     callsWithTranscripts,
@@ -1149,7 +1146,7 @@ Let's dive into your data!`,
               <div className="flex bg-bg-secondary rounded-lg shadow-sm border border-bg-secondary p-4">
                 <div className="flex-1">
                   <h3 className="text-sm font-medium text-white">
-                    Avg Handle Time
+                    Avg Handle Time (sec)
                   </h3>
                   <p className="text-2xl font-bold text-blue-600">
                     {stats.avgDuration}
@@ -1248,7 +1245,7 @@ Let's dive into your data!`,
 
                   <div className="flex-1 bg-bg-secondary rounded-lg shadow-sm border border-bg-secondary drop-shadow p-6">
                     <h3 className="text-xs font-semibold text-white mb-4">
-                      Average Handle Time by Hour
+                      Average Handle Time by Hour (seconds)
                     </h3>
                     <ResponsiveContainer width="100%" height={300}>
                       <LineChart data={analyticsData.ahtData}>
@@ -1256,7 +1253,7 @@ Let's dive into your data!`,
                         <XAxis dataKey="hour" stroke="none" />
                         {/* <YAxis label={{ value: 'Minutes', angle: -90, position: 'insideLeft' }} /> */}
                         <Tooltip
-                          formatter={(value) => [`${value} min`, "AHT"]}
+                          formatter={(value) => [`${value} sec`, "AHT"]}
                            contentStyle={{ backgroundColor: "black", color: "white", border: "none" }}
                         />
                         <Line

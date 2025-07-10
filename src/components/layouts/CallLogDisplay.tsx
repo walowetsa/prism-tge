@@ -46,6 +46,7 @@ interface ProcessingSummary {
   missingTranscriptions: number;
   processedThisRequest: number;
   errors: number;
+  hasMoreToProcess?: boolean;
 }
 
 interface ProcessingError {
@@ -60,6 +61,7 @@ interface AutoProcessingState {
   processed: number;
   failed: number;
   remaining: number;
+  actuallyProcessed: number; // Track calls actually processed from API
 }
 
 interface SupabaseCallRecord {
@@ -85,6 +87,7 @@ type SortDirection = 'asc' | 'desc';
 const ITEMS_PER_PAGE = 100;
 const BATCH_SIZE = 5;
 const REALTIME_UPDATE_INTERVAL = 10000; // 10 seconds
+const MAX_AUTO_PROCESSING_ATTEMPTS = 50; // Prevent infinite loops
 
 const CallLogDisplay = ({
   selectedDateRange,
@@ -107,7 +110,8 @@ const CallLogDisplay = ({
     totalBatches: 0,
     processed: 0,
     failed: 0,
-    remaining: 0
+    remaining: 0,
+    actuallyProcessed: 0
   });
   const [lastSupabaseUpdate, setLastSupabaseUpdate] = useState<string | null>(null);
   
@@ -120,6 +124,7 @@ const CallLogDisplay = ({
   // Refs for tracking and cleanup
   const autoProcessingInitiated = useRef<string | null>(null);
   const realtimeInterval = useRef<NodeJS.Timeout | null>(null);
+  const autoProcessingAttempts = useRef<number>(0);
 
   // Fetch all transcribed calls from Supabase
   const fetchSupabaseRecords = async () => {
@@ -246,10 +251,11 @@ const CallLogDisplay = ({
       totalCalls: total,
       existingTranscriptions: transcribed,
       missingTranscriptions: missing,
-      processedThisRequest: autoProcessing.processed,
-      errors: autoProcessing.failed
+      processedThisRequest: autoProcessing.actuallyProcessed,
+      errors: autoProcessing.failed,
+      hasMoreToProcess: missing > 0
     };
-  }, [mergedCallLogs, autoProcessing.processed, autoProcessing.failed]);
+  }, [mergedCallLogs, autoProcessing.actuallyProcessed, autoProcessing.failed]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -367,8 +373,8 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process batch of transcriptions
-  const processBatch = async (batchNumber: number) => {
+  // Enhanced process batch function with better error handling and continuation logic
+  const processBatch = async (batchNumber: number): Promise<boolean> => {
     if (!selectedDateRange) return false;
 
     try {
@@ -393,26 +399,27 @@ const CallLogDisplay = ({
           setProcessingErrors(prev => [...prev, ...data.errors]);
         }
 
-        // Update auto-processing state
-        const processed = data.summary.processedThisRequest || 0;
+        // Update auto-processing state with actual progress
+        const actuallyProcessed = data.summary.processedThisRequest || 0;
         const errors = data.errors?.length || 0;
+        const hasMoreWork = data.summary.hasMoreToProcess || false;
 
         setAutoProcessing(prev => ({
           ...prev,
-          processed: prev.processed + processed,
+          actuallyProcessed: prev.actuallyProcessed + actuallyProcessed,
           failed: prev.failed + errors,
-          remaining: Math.max(0, prev.remaining - BATCH_SIZE)
+          remaining: Math.max(0, data.summary.missingTranscriptions || 0)
         }));
 
-        console.log(`✅ Batch ${batchNumber} completed: ${processed} processed, ${errors} failed`);
+        console.log(`✅ Batch ${batchNumber} completed: ${actuallyProcessed} processed, ${errors} failed, hasMore: ${hasMoreWork}`);
         
-        // Return true if there are still calls to process
-        return data.summary.missingTranscriptions > 0;
+        // Continue if there's more work and we actually processed something or there are remaining calls
+        return hasMoreWork && (actuallyProcessed > 0 || data.summary.missingTranscriptions > 0);
       } else {
         console.error(`❌ Batch ${batchNumber} failed:`, data.error);
         setAutoProcessing(prev => ({
           ...prev,
-          failed: prev.failed + BATCH_SIZE
+          failed: prev.failed + 1 // Count batch failure
         }));
         return false;
       }
@@ -420,27 +427,31 @@ const CallLogDisplay = ({
       console.error(`❌ Network error in batch ${batchNumber}:`, err);
       setAutoProcessing(prev => ({
         ...prev,
-        failed: prev.failed + BATCH_SIZE
+        failed: prev.failed + 1 // Count network failure
       }));
       return false;
     }
   };
 
-  // Auto-process all missing transcriptions
-  const autoProcessAllTranscriptions = async (missingCount: number) => {
-    if (missingCount === 0) return;
+  // Enhanced auto-process function with better termination conditions
+  const autoProcessAllTranscriptions = async (initialMissingCount: number) => {
+    if (initialMissingCount === 0) return;
 
-    const totalBatches = Math.ceil(missingCount / BATCH_SIZE);
+    const estimatedTotalBatches = Math.ceil(initialMissingCount / BATCH_SIZE);
     
-    console.log(`🎯 Starting auto-processing: ${missingCount} calls in ${totalBatches} batches of ${BATCH_SIZE}`);
+    console.log(`🎯 Starting auto-processing: ${initialMissingCount} calls estimated in ~${estimatedTotalBatches} batches of ${BATCH_SIZE}`);
+
+    // Reset processing attempts counter
+    autoProcessingAttempts.current = 0;
 
     setAutoProcessing({
       isRunning: true,
       currentBatch: 0,
-      totalBatches,
+      totalBatches: estimatedTotalBatches,
       processed: 0,
       failed: 0,
-      remaining: missingCount
+      remaining: initialMissingCount,
+      actuallyProcessed: 0
     });
 
     setProcessing(true);
@@ -448,21 +459,47 @@ const CallLogDisplay = ({
 
     let currentBatch = 1;
     let hasMoreToProcess = true;
+    let consecutiveFailures = 0;
+    const maxConsecutiveFailures = 3;
 
-    while (hasMoreToProcess && currentBatch <= totalBatches) {
+    while (hasMoreToProcess && currentBatch <= MAX_AUTO_PROCESSING_ATTEMPTS) {
+      autoProcessingAttempts.current++;
+      
       setAutoProcessing(prev => ({
         ...prev,
-        currentBatch
+        currentBatch,
+        totalBatches: Math.max(prev.totalBatches, currentBatch) // Adjust if needed
       }));
 
-      console.log(`📋 Processing batch ${currentBatch}/${totalBatches}...`);
+      console.log(`📋 Processing batch ${currentBatch} (attempt ${autoProcessingAttempts.current})...`);
 
-      hasMoreToProcess = await processBatch(currentBatch);
-      
-      // Small delay between batches to prevent overwhelming the server
-      if (hasMoreToProcess && currentBatch < totalBatches) {
-        console.log(`⏸️ Waiting 3 seconds before next batch...`);
-        await new Promise(resolve => setTimeout(resolve, 3000));
+      try {
+        hasMoreToProcess = await processBatch(currentBatch);
+        
+        if (hasMoreToProcess) {
+          consecutiveFailures = 0; // Reset failure counter on success
+          
+          // Dynamic delay based on batch number (longer delays for later batches)
+          const delay = Math.min(3000 + (currentBatch - 1) * 500, 10000);
+          console.log(`⏸️ Waiting ${delay/1000} seconds before next batch...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.log(`🎉 No more calls to process after batch ${currentBatch}`);
+          break;
+        }
+      } catch (error) {
+        consecutiveFailures++;
+        console.error(`❌ Fatal error in batch ${currentBatch}:`, error);
+        
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          console.error(`🛑 Stopping auto-processing after ${maxConsecutiveFailures} consecutive failures`);
+          break;
+        }
+        
+        // Exponential backoff for failures
+        const errorDelay = Math.min(5000 * Math.pow(2, consecutiveFailures - 1), 30000);
+        console.log(`⏸️ Error recovery: waiting ${errorDelay/1000} seconds before retry...`);
+        await new Promise(resolve => setTimeout(resolve, errorDelay));
       }
 
       currentBatch++;
@@ -475,7 +512,17 @@ const CallLogDisplay = ({
 
     setProcessing(false);
 
-    console.log(`🎉 Auto-processing completed! Processed: ${autoProcessing.processed}, Failed: ${autoProcessing.failed}`);
+    // Final summary
+    const finalStats = autoProcessing;
+    console.log(`🎉 Auto-processing completed!`);
+    console.log(`📊 Final stats: ${finalStats.actuallyProcessed} processed, ${finalStats.failed} failed, ${currentBatch - 1} batches`);
+    
+    if (autoProcessingAttempts.current >= MAX_AUTO_PROCESSING_ATTEMPTS) {
+      console.warn(`⚠️ Stopped processing after reaching maximum attempts (${MAX_AUTO_PROCESSING_ATTEMPTS})`);
+    }
+
+    // Final refresh to ensure UI is up to date
+    await fetchSupabaseRecords();
   };
 
   // Setup real-time updates for Supabase
@@ -487,10 +534,12 @@ const CallLogDisplay = ({
       clearInterval(realtimeInterval.current);
     }
 
-    // Setup new interval for real-time updates
+    // Setup new interval for real-time updates (but only when not actively processing)
     realtimeInterval.current = setInterval(() => {
-      console.log('🔄 Real-time update: Refreshing Supabase records...');
-      fetchSupabaseRecords();
+      if (!autoProcessing.isRunning) {
+        console.log('🔄 Real-time update: Refreshing Supabase records...');
+        fetchSupabaseRecords();
+      }
     }, REALTIME_UPDATE_INTERVAL);
 
     // Cleanup on unmount or date range change
@@ -500,7 +549,7 @@ const CallLogDisplay = ({
         realtimeInterval.current = null;
       }
     };
-  }, [selectedDateRange]);
+  }, [selectedDateRange, autoProcessing.isRunning]);
 
   // Fetch call logs using the unified route (after Supabase check)
   useEffect(() => {
@@ -519,7 +568,8 @@ const CallLogDisplay = ({
         totalBatches: 0,
         processed: 0,
         failed: 0,
-        remaining: 0
+        remaining: 0,
+        actuallyProcessed: 0
       });
 
       try {
@@ -613,36 +663,40 @@ const CallLogDisplay = ({
             </h6>
           </div>
 
-          {/* Real-time Status Banner */}
+          {/* Enhanced Real-time Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              🔄 Real-time updates: Checking Supabase every {REALTIME_UPDATE_INTERVAL/1000} seconds for new transcriptions
+              🔄 Real-time updates: Checking Supabase every {REALTIME_UPDATE_INTERVAL/1000} seconds
+              {autoProcessing.isRunning && (
+                <span className="ml-2 text-yellow-300">⏸️ Paused during processing</span>
+              )}
             </div>
           </div>
 
-          {/* Auto-Processing Status */}
+          {/* Enhanced Auto-Processing Status */}
           {autoProcessing.isRunning && (
             <div className="mb-4 p-4 bg-blue-900 border border-blue-600 rounded-lg">
               <div className="text-sm text-blue-300 font-medium mb-2">
-                🤖 Auto-Processing Transcriptions
+                🤖 Auto-Processing Transcriptions (Continuous Mode)
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-blue-200">
-                <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}/{autoProcessing.totalBatches}</span></div>
-                <div>Processed: <span className="text-green-400 font-medium">{autoProcessing.processed}</span></div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-blue-200 mb-2">
+                <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}/{autoProcessing.totalBatches}+</span></div>
+                <div>Processed: <span className="text-green-400 font-medium">{autoProcessing.actuallyProcessed}</span></div>
                 <div>Failed: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
                 <div>Remaining: <span className="text-yellow-400 font-medium">{autoProcessing.remaining}</span></div>
+                <div>Attempts: <span className="text-purple-400 font-medium">{autoProcessingAttempts.current}/{MAX_AUTO_PROCESSING_ATTEMPTS}</span></div>
               </div>
               <div className="mt-2">
                 <div className="w-full bg-blue-800 rounded-full h-2">
                   <div 
                     className="bg-blue-400 h-2 rounded-full transition-all duration-500" 
                     style={{ 
-                      width: `${autoProcessing.totalBatches > 0 ? (autoProcessing.currentBatch / autoProcessing.totalBatches) * 100 : 0}%` 
+                      width: `${Math.min((autoProcessingAttempts.current / MAX_AUTO_PROCESSING_ATTEMPTS) * 100, 100)}%`
                     }}
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 3-second delays
+                  Processing {BATCH_SIZE} calls per batch • Dynamic delays • Auto-continues until complete
                 </div>
               </div>
             </div>
@@ -653,18 +707,24 @@ const CallLogDisplay = ({
             <div className="text-sm text-[#4ecca3] font-medium mb-2">
               📊 Live Processing Summary
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-xs text-gray-300">
               <div>Total Calls: <span className="text-white font-medium">{calculatedSummary.totalCalls}</span></div>
               <div>Transcribed: <span className="text-green-400 font-medium">{calculatedSummary.existingTranscriptions}</span></div>
               <div>Missing: <span className="text-yellow-400 font-medium">{calculatedSummary.missingTranscriptions}</span></div>
-              <div>Auto-Processed: <span className="text-blue-400 font-medium">{autoProcessing.processed}</span></div>
+              <div>Auto-Processed: <span className="text-blue-400 font-medium">{autoProcessing.actuallyProcessed}</span></div>
               <div>Errors: <span className="text-red-400 font-medium">{autoProcessing.failed}</span></div>
+              <div>Progress: <span className="text-purple-400 font-medium">
+                {calculatedSummary.totalCalls > 0 
+                  ? `${Math.round((calculatedSummary.existingTranscriptions / calculatedSummary.totalCalls) * 100)}%`
+                  : '0%'
+                }
+              </span></div>
             </div>
             
             {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
               <div className="mt-3 flex items-center gap-2">
                 <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions
+                  🤖 Auto-processing will resume automatically • Continuous mode active
                 </div>
                 <button
                   onClick={() => fetchSupabaseRecords()}
@@ -736,7 +796,7 @@ const CallLogDisplay = ({
             <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
               <div className="text-yellow-200">
                 {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches}...` 
+                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch} (continuous mode)...` 
                   : '🚀 Processing transcriptions...'
                 }
               </div>

@@ -128,7 +128,7 @@ async function getContactLogs(dateRange?: DateRange) {
   }
 }
 
-// Helper function to check Supabase status for call logs
+// Enhanced helper function to check Supabase status with fresh data
 async function enhanceCallLogsWithSupabaseStatus(
   logs: CallLog[]
 ): Promise<CallLog[]> {
@@ -137,6 +137,7 @@ async function enhanceCallLogsWithSupabaseStatus(
 
     const contactIds = logs.map((log) => log.contact_id);
 
+    // Force fresh query with no caching
     const { data: existingRecords, error } = await supabase
       .from("call_records")
       .select("contact_id")
@@ -151,10 +152,14 @@ async function enhanceCallLogsWithSupabaseStatus(
       existingRecords?.map((record) => record.contact_id) || []
     );
 
-    return logs.map((log) => ({
+    const enhancedLogs = logs.map((log) => ({
       ...log,
       existsInSupabase: existingContactIds.has(log.contact_id),
     }));
+
+    console.log(`📊 Supabase status check: ${existingContactIds.size} existing transcriptions out of ${logs.length} total calls`);
+    
+    return enhancedLogs;
   } catch (error) {
     console.error("Error enhancing call logs with Supabase status:", error);
     return logs.map((log) => ({ ...log, existsInSupabase: false }));
@@ -786,13 +791,14 @@ export async function GET(request: NextRequest) {
     let logs = await getContactLogs(dateRange);
     console.log(`Found ${logs.length} call logs`);
 
-    // Step 2: Check Supabase status
+    // Step 2: Check Supabase status (always fresh query)
     console.log("🔍 Step 2: Checking Supabase for existing transcriptions...");
     logs = await enhanceCallLogsWithSupabaseStatus(logs);
 
     const missingTranscriptions = logs.filter(
       (log) => !log.existsInSupabase && log.recording_location
     );
+    
     console.log(
       `Found ${missingTranscriptions.length} calls without transcriptions`
     );
@@ -881,17 +887,24 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Step 4: Return results
-    console.log("📋 Step 4: Preparing response...");
+    // Step 4: Fresh check after processing to get accurate counts
+    if (processedCount > 0) {
+      console.log("🔄 Step 4: Re-checking Supabase status after processing...");
+      logs = await enhanceCallLogsWithSupabaseStatus(logs);
+    }
+
+    // Calculate final summary with fresh data
+    const finalMissingTranscriptions = logs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
+    );
 
     const summary = {
       totalCalls: logs.length,
       existingTranscriptions: logs.filter((log) => log.existsInSupabase).length,
-      missingTranscriptions: logs.filter(
-        (log) => !log.existsInSupabase && log.recording_location
-      ).length,
+      missingTranscriptions: finalMissingTranscriptions.length,
       processedThisRequest: processedCount,
       errors: errors.length,
+      hasMoreToProcess: finalMissingTranscriptions.length > 0,
     };
 
     console.log("🎉 Unified workflow completed:", summary);
@@ -1017,17 +1030,24 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Fresh check after processing
+    const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
+    const finalMissingTranscriptions = finalEnhancedLogs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
+    );
+
     return NextResponse.json({
       success: true,
-      data: enhancedLogs,
+      data: finalEnhancedLogs,
       summary: {
         requestedCalls: contactIds.length,
         foundCalls: targetLogs.length,
-        existingTranscriptions: enhancedLogs.filter(
+        existingTranscriptions: finalEnhancedLogs.filter(
           (log) => log.existsInSupabase
         ).length,
         processedThisRequest: processedCount,
         errors: errors.length,
+        hasMoreToProcess: finalMissingTranscriptions.length > 0,
       },
       errors: errors.length > 0 ? errors : undefined,
       timestamp: new Date().toISOString(),

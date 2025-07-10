@@ -84,7 +84,6 @@ type SortDirection = 'asc' | 'desc';
 
 const ITEMS_PER_PAGE = 100;
 const BATCH_SIZE = 5;
-const REALTIME_UPDATE_INTERVAL = 10000; // 10 seconds
 
 // CRITICAL FIX: Global flag to prevent multiple auto-processing sessions
 const GLOBAL_PROCESSING_KEY = 'autoProcessingActive';
@@ -122,7 +121,6 @@ const CallLogDisplay = ({
 
   // Refs for tracking and cleanup
   const autoProcessingInitiated = useRef<string | null>(null);
-  const realtimeInterval = useRef<NodeJS.Timeout | null>(null);
   const isAutoProcessingRunning = useRef<boolean>(false);
   const processedContactIds = useRef<Set<string>>(new Set());
   const currentBatchNumber = useRef<number>(0);
@@ -567,11 +565,6 @@ const CallLogDisplay = ({
         console.log('🧹 Component unmounting - clearing global processing flag');
         sessionStorage.removeItem(GLOBAL_PROCESSING_KEY);
       }
-      
-      if (realtimeInterval.current) {
-        clearInterval(realtimeInterval.current);
-        realtimeInterval.current = null;
-      }
     };
   }, []);
 
@@ -584,31 +577,6 @@ const CallLogDisplay = ({
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedAgent, sortField, sortDirection]);
-
-  // Setup real-time updates for Supabase
-  useEffect(() => {
-    if (!selectedDateRange) return;
-
-    if (realtimeInterval.current) {
-      clearInterval(realtimeInterval.current);
-    }
-
-    realtimeInterval.current = setInterval(() => {
-      if (!isAutoProcessingRunning.current) {
-        console.log('🔄 Real-time update: Refreshing Supabase records...');
-        fetchSupabaseRecords();
-      } else {
-        console.log('⏸️ Real-time update paused: auto-processing is running');
-      }
-    }, REALTIME_UPDATE_INTERVAL);
-
-    return () => {
-      if (realtimeInterval.current) {
-        clearInterval(realtimeInterval.current);
-        realtimeInterval.current = null;
-      }
-    };
-  }, [selectedDateRange]);
 
   // Fetch call logs
   useEffect(() => {
@@ -652,6 +620,7 @@ const CallLogDisplay = ({
         if (data.success) {
           setCallLogs(data.data || []);
           console.log('📋 Call logs loaded:', data.summary);
+          console.log('🚫 Real-time updates DISABLED - no more repeated checking every 10 seconds');
 
           const missing = data.summary.missingTranscriptions;
           const shouldStartAutoProcessing = (
@@ -741,12 +710,12 @@ const CallLogDisplay = ({
             </h6>
           </div>
 
-          {/* Real-time Status Banner */}
+          {/* Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              🔄 Real-time updates: Checking Supabase every {REALTIME_UPDATE_INTERVAL/1000} seconds for new transcriptions
+              📊 Auto-processing will check for missing transcriptions and process them automatically
               {isAutoProcessingRunning.current && (
-                <span className="ml-2 text-yellow-400">(Paused during auto-processing)</span>
+                <span className="ml-2 text-yellow-400">(Currently auto-processing)</span>
               )}
             </div>
           </div>
@@ -774,7 +743,7 @@ const CallLogDisplay = ({
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 8-second delays (prevents duplicates, progresses through different calls)
+                  Processing {BATCH_SIZE} calls per batch with 8-second delays (no repeated checking - processes different calls each batch)
                 </div>
               </div>
             </div>
@@ -796,13 +765,13 @@ const CallLogDisplay = ({
             {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
               <div className="mt-3 flex items-center gap-2">
                 <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions (batch progression prevents re-processing same calls)
+                  🤖 Auto-processing will start automatically for missing transcriptions (no more repeated checking!)
                 </div>
                 <button
                   onClick={() => fetchSupabaseRecords()}
                   className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700"
                 >
-                  🔄 Refresh Now
+                  🔄 Manual Refresh
                 </button>
               </div>
             )}
@@ -868,7 +837,7 @@ const CallLogDisplay = ({
             <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
               <div className="text-yellow-200">
                 {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (progressing through different calls, ${processedContactIds.current.size} excluded)...` 
+                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (no repeated checking - processing different calls each batch, ${processedContactIds.current.size} excluded)...` 
                   : '🚀 Processing transcriptions...'
                 }
               </div>

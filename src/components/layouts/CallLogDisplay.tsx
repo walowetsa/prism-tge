@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
@@ -241,10 +240,12 @@ const CallLogDisplay = ({
   const processBatch = async (callsToProcess: CallLog[]) => {
     if (callsToProcess.length === 0) return [];
 
-    const contactIds = callsToProcess.slice(0, BATCH_SIZE).map(call => call.contact_id);
+    const batchToProcess = callsToProcess.slice(0, BATCH_SIZE);
+    const remainingAfterBatch = callsToProcess.slice(BATCH_SIZE);
+    const contactIds = batchToProcess.map(call => call.contact_id);
     
     try {
-      console.log(`🚀 Processing batch of ${contactIds.length} calls:`, contactIds);
+      console.log(`🚀 Processing batch of ${contactIds.length} calls (${remainingAfterBatch.length} remaining):`, contactIds);
 
       // Mark calls as processing
       setCallLogs(prevLogs => 
@@ -286,7 +287,8 @@ const CallLogDisplay = ({
         setProcessedCount(prev => prev + contactIds.length);
         console.log(`✅ Successfully processed batch: ${contactIds.length} calls`);
         
-        return [];
+        // Return remaining calls to continue processing
+        return remainingAfterBatch;
       } else {
         // Mark failed calls
         setCallLogs(prevLogs => 
@@ -299,7 +301,9 @@ const CallLogDisplay = ({
         
         const errors = contactIds.map(id => ({ contact_id: id, error: data.error || "Unknown error" }));
         setProcessingErrors(prev => [...prev, ...errors]);
-        return callsToProcess.slice(BATCH_SIZE);
+        
+        // Continue with remaining calls even if this batch failed
+        return remainingAfterBatch;
       }
     } catch (err) {
       console.error("Error processing batch:", err);
@@ -315,7 +319,9 @@ const CallLogDisplay = ({
       
       const errors = contactIds.map(id => ({ contact_id: id, error: "Network error" }));
       setProcessingErrors(prev => [...prev, ...errors]);
-      return callsToProcess.slice(BATCH_SIZE);
+      
+      // Continue with remaining calls even if this batch failed
+      return remainingAfterBatch;
     }
   };
 
@@ -341,9 +347,13 @@ const CallLogDisplay = ({
     console.log(`🎯 Starting auto-processing of ${callsNeedingTranscription.length} calls in batches of ${BATCH_SIZE}`);
 
     let remainingCalls = [...callsNeedingTranscription];
+    let batchNumber = 1;
 
     while (remainingCalls.length > 0 && processingRef.current) {
+      console.log(`📦 Processing batch ${batchNumber}: ${remainingCalls.length} calls remaining`);
+      
       remainingCalls = await processBatch(remainingCalls);
+      batchNumber++;
       
       // Small delay between batches to avoid overwhelming the server
       if (remainingCalls.length > 0) {
@@ -351,7 +361,8 @@ const CallLogDisplay = ({
       }
     }
 
-    console.log(`🏁 Auto-processing completed. Processed: ${callsNeedingTranscription.length - remainingCalls.length}, Remaining: ${remainingCalls.length}`);
+    const totalProcessed = callsNeedingTranscription.length - remainingCalls.length;
+    console.log(`🏁 Auto-processing completed. Total processed: ${totalProcessed}/${callsNeedingTranscription.length}, Failed: ${remainingCalls.length}`);
     
     setProcessing(false);
     processingRef.current = false;

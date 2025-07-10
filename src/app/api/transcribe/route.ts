@@ -70,188 +70,56 @@ function getServerUrl(): string {
   return possibleUrls[0] || 'http://192.168.40.101:3000';
 }
 
-/**
- * FIXED: NO TIMEOUTS - download with basic retry logic for call recordings
- */
-async function downloadAudioWithChunking(sftpFilename: string): Promise<Blob> {
-  console.log("🔽 Starting call recording download (NO TIMEOUTS):", sftpFilename);
-  
-  const serverUrl = getServerUrl();
-  const decodedFilename = decodeURIComponent(sftpFilename);
-  const downloadUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(decodedFilename)}`;
-  
-  console.log("📡 Download URL:", downloadUrl);
-
-  // Simple retry without timeouts
-  const maxRetries = 2;
-  const retryDelays = [2000, 5000]; // 2s, 5s
-  
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      console.log(`📥 Download attempt ${attempt + 1}/${maxRetries} (NO TIMEOUT)`);
-      
-      // NO TIMEOUT on fetch
-      const response = await fetch(downloadUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'TranscriptionService/1.0',
-          'Accept': 'audio/*,*/*',
-          'Cache-Control': 'no-cache',
-        },
-        // NO SIGNAL/TIMEOUT
-      });
-
-      if (!response.ok) {
-        throw new Error(`Download failed: ${response.status} - ${response.statusText}`);
-      }
-
-      // Check content length
-      const contentLength = response.headers.get('content-length');
-      if (contentLength) {
-        const sizeInMB = parseInt(contentLength) / (1024 * 1024);
-        console.log(`📊 Call recording size: ${sizeInMB.toFixed(2)}MB (NO TIMEOUT LIMITS)`);
-      }
-
-      // Read the response as a blob - NO TIMEOUT
-      const audioBlob = await response.blob();
-      
-      console.log(`✅ Downloaded successfully: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
-      
-      // Validate the downloaded blob
-      if (audioBlob.size === 0) {
-        throw new Error("Downloaded file is empty");
-      }
-      
-      if (audioBlob.size < 10000) {
-        throw new Error(`Downloaded file too small for a call recording: ${audioBlob.size} bytes`);
-      }
-
-      return audioBlob;
-
-    } catch (error) {
-      console.error(`❌ Download attempt ${attempt + 1} failed:`, error);
-      
-      if (attempt === maxRetries - 1) {
-        // Last attempt failed
-        throw new Error(`Download failed after ${maxRetries} attempts: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-      
-      // Wait before retry
-      const delay = retryDelays[attempt];
-      console.log(`⏳ Waiting ${delay}ms before retry...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  
-  throw new Error("Download failed - should not reach here");
-}
+// REMOVED: No longer needed with infrastructure bypass approach
+// downloadAudioWithChunking and uploadToAssemblyAI functions removed
+// since we now use direct URLs
 
 /**
- * FIXED: Upload to AssemblyAI with NO TIMEOUT
- */
-async function uploadToAssemblyAI(audioBlob: Blob, apiKey: string, originalFilename?: string): Promise<string> {
-  console.log("⬆️ Uploading to AssemblyAI (NO TIMEOUT):", {
-    size: audioBlob.size,
-    sizeInMB: (audioBlob.size / (1024 * 1024)).toFixed(2),
-    type: audioBlob.type,
-    originalFilename
-  });
-
-  // Prepare filename
-  let filename = 'audio.wav';
-  if (originalFilename) {
-    const decodedFilename = decodeURIComponent(originalFilename);
-    filename = decodedFilename.split('/').pop() || 'audio.wav';
-    
-    // Ensure proper audio extension
-    if (!filename.match(/\.(wav|mp3|flac|m4a|aac|ogg)$/i)) {
-      filename = filename.replace(/\.[^.]*$/, '') + '.wav';
-    }
-  }
-
-  // Create form data with optimized blob
-  const formData = new FormData();
-  
-  // Ensure proper MIME type for audio recognition
-  const optimizedBlob = new Blob([audioBlob], { 
-    type: audioBlob.type || 'audio/wav' 
-  });
-  
-  formData.append("file", optimizedBlob, filename);
-
-  console.log(`⏰ NO TIMEOUT SET - will wait as long as needed`);
-
-  try {
-    const uploadResponse = await fetch("https://api.assemblyai.com/v2/upload", {
-      method: "POST",
-      headers: {
-        Authorization: apiKey,
-      },
-      body: formData,
-      // NO SIGNAL/TIMEOUT
-    });
-
-    if (!uploadResponse.ok) {
-      const errorData = await uploadResponse.json();
-      console.error("❌ AssemblyAI upload error:", errorData);
-      throw new Error(`AssemblyAI upload failed: ${uploadResponse.status} - ${JSON.stringify(errorData)}`);
-    }
-
-    const uploadData = await uploadResponse.json();
-    console.log("✅ Upload successful:", uploadData.upload_url);
-    
-    return uploadData.upload_url;
-    
-  } catch (error) {
-    throw error;
-  }
-}
-
-/**
- * FIXED: Try direct URL first with NO TIMEOUT, then download approach
+ * INFRASTRUCTURE BYPASS: Use direct SFTP URL approach
  */
 async function getOptimizedAudioUrl(sftpFilename: string, apiKey: string): Promise<string> {
-  console.log("🎯 Starting optimized audio URL resolution (NO TIMEOUTS):", sftpFilename);
+  console.log("🎯 INFRASTRUCTURE BYPASS: Using direct URL approach:", sftpFilename);
   
   const serverUrl = getServerUrl();
   const decodedFilename = decodeURIComponent(sftpFilename);
   const directUrl = `${serverUrl}/api/sftp/download?filename=${encodeURIComponent(decodedFilename)}`;
   
-  // STEP 1: Quick direct URL test (NO TIMEOUT)
+  // INFRASTRUCTURE BYPASS: Always use direct URL - let AssemblyAI handle the download
+  console.log("🚀 INFRASTRUCTURE BYPASS: Using direct URL to avoid server timeout");
+  console.log(`🎯 Direct URL: ${directUrl}`);
+  
+  // Quick validation that the file exists (but don't download it ourselves)
   try {
-    console.log("🚀 Testing direct URL approach (NO TIMEOUT)...");
-    
+    console.log("📋 Quick file validation...");
     const headResponse = await fetch(directUrl, { 
       method: 'HEAD',
-      // NO TIMEOUT
+      signal: AbortSignal.timeout(15000) // Quick 15-second check only
     });
     
     if (headResponse.ok) {
       const contentLength = headResponse.headers.get('content-length');
       const sizeInMB = contentLength ? parseInt(contentLength) / (1024 * 1024) : 0;
       
-      console.log(`✅ Direct URL verified! File: ${sizeInMB.toFixed(2)}MB`);
-      console.log(`🎯 Using direct URL: ${directUrl}`);
-      
+      console.log(`✅ File validated! Size: ${sizeInMB.toFixed(2)}MB - letting AssemblyAI download directly`);
+      return directUrl;
+    } else {
+      console.log(`⚠️ File validation failed (${headResponse.status}), but proceeding with direct URL anyway`);
       return directUrl;
     }
-  } catch (directError) {
-    console.log(`❌ Direct URL failed: ${directError instanceof Error ? directError.message : 'Unknown'}`);
+  } catch (validationError) {
+    console.log(`⚠️ File validation error, but proceeding with direct URL: ${validationError instanceof Error ? validationError.message : 'Unknown'}`);
+    return directUrl;
   }
-  
-  // STEP 2: Download and upload approach (NO TIMEOUTS)
-  console.log("🔄 Using download+upload approach (NO TIMEOUTS)...");
-  
-  const audioBlob = await downloadAudioWithChunking(sftpFilename);
-  const uploadUrl = await uploadToAssemblyAI(audioBlob, apiKey, sftpFilename);
-  
-  return uploadUrl;
 }
 
 /**
- * Topic categorization with NO TIMEOUT
+ * Topic categorization with infrastructure timeout protection
  */
-async function performTopicCategorization(transcriptData: any) {
+async function performTopicCategorization(transcriptData: any): Promise<{
+  primary_category: string;
+  topic_categories: string[];
+  confidence: number;
+} | null> {
   try {
     const serverUrl = getServerUrl();
 
@@ -259,7 +127,7 @@ async function performTopicCategorization(transcriptData: any) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: transcriptData }),
-      // NO TIMEOUT
+      signal: AbortSignal.timeout(20000), // 20 seconds to avoid infrastructure timeout
     });
 
     if (!response.ok) {
@@ -286,7 +154,6 @@ async function performTopicCategorization(transcriptData: any) {
 
 export async function POST(request: Request) {
   const requestStartTime = Date.now();
-  // REMOVED: NO timeout limits - let it run as long as needed
   
   try {
     const body = await request.json();
@@ -299,7 +166,7 @@ export async function POST(request: Request) {
       callData = null,
     } = body;
 
-    console.log("🎬 CALL RECORDING TRANSCRIPTION START (NO TIMEOUTS):", {
+    console.log("🎬 INFRASTRUCTURE BYPASS TRANSCRIPTION:", {
       filename,
       isDirectSftpFile,
       sftpFilename,
@@ -322,9 +189,9 @@ export async function POST(request: Request) {
 
     let uploadUrl: string;
 
-    // PHASE 1: Get audio URL efficiently (NO TIMEOUTS)
+    // PHASE 1: Get audio URL (INFRASTRUCTURE BYPASS)
     try {
-      console.log("📁 PHASE 1: Audio processing (NO TIMEOUTS)...");
+      console.log("📁 PHASE 1: Audio URL resolution (INFRASTRUCTURE BYPASS)...");
       
       if (isDirectSftpFile && sftpFilename) {
         uploadUrl = await getOptimizedAudioUrl(sftpFilename, apiKey);
@@ -335,7 +202,7 @@ export async function POST(request: Request) {
         throw new Error("No valid audio source");
       }
 
-      console.log(`✅ Audio URL ready: ${uploadUrl.substring(0, 100)}...`);
+      console.log(`✅ Audio URL ready (INFRASTRUCTURE BYPASS): ${uploadUrl.substring(0, 100)}...`);
 
     } catch (audioError) {
       console.error("❌ Audio processing failed:", audioError);
@@ -347,8 +214,8 @@ export async function POST(request: Request) {
       }, { status: 500 });
     }
 
-    // PHASE 2: Submit to AssemblyAI (NO TIMEOUT)
-    console.log("📡 PHASE 2: Submitting to AssemblyAI (NO TIMEOUT)...");
+    // PHASE 2: Submit to AssemblyAI (Quick operation)
+    console.log("📡 PHASE 2: Submitting to AssemblyAI (INFRASTRUCTURE BYPASS)...");
     
     const transcriptResponse = await fetch("https://api.assemblyai.com/v2/transcript", {
       method: "POST",
@@ -371,7 +238,7 @@ export async function POST(request: Request) {
         punctuate: true,
         format_text: true,
       }),
-      // NO TIMEOUT
+      signal: AbortSignal.timeout(30000), // 30 seconds should be plenty for submission
     });
 
     if (!transcriptResponse.ok) {
@@ -384,49 +251,51 @@ export async function POST(request: Request) {
     }
 
     const { id } = await transcriptResponse.json();
-    console.log(`✅ Transcription job created: ${id}`);
+    console.log(`✅ Transcription job created (INFRASTRUCTURE BYPASS): ${id}`);
 
-    // PHASE 3: Poll for results (NO TIMEOUT LIMITS)
-    console.log("⏳ PHASE 3: Polling for results (NO TIMEOUT LIMITS)...");
+    // PHASE 3: Quick initial poll, then return with job ID for client-side polling
+    console.log("⏳ PHASE 3: Initial status check...");
     
     let transcript;
     let status = "processing";
     let attempts = 0;
-    const pollInterval = 5000; // 5 seconds between polls
+    const maxQuickAttempts = 6; // Only 30 seconds of polling (6 * 5 seconds)
+    const pollInterval = 5000;
 
-    while (status === "processing" || status === "queued") {
+    // Do a few quick polls to catch fast transcriptions
+    while ((status === "processing" || status === "queued") && attempts < maxQuickAttempts) {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
       attempts++;
 
       try {
         const statusResponse = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
           headers: { Authorization: apiKey },
-          // NO TIMEOUT
+          signal: AbortSignal.timeout(10000),
         });
 
         if (!statusResponse.ok) {
           console.error("Status check failed:", statusResponse.status);
-          continue;
+          break;
         }
 
         transcript = await statusResponse.json();
         status = transcript.status;
         
-        // Log progress every 12 attempts (60 seconds)
-        if (attempts % 12 === 0) {
-          const elapsed = Date.now() - requestStartTime;
-          console.log(`📊 Status: ${status}, attempt: ${attempts}, elapsed: ${Math.round(elapsed/1000)}s (NO TIMEOUT LIMITS)`);
+        console.log(`📊 Quick poll ${attempts}/${maxQuickAttempts}: ${status}`);
+        
+        if (status === "completed" || status === "error") {
+          break;
         }
         
       } catch (statusError) {
         console.error("Status check error:", statusError);
-        // Continue polling even on errors
+        break;
       }
     }
 
-    // PHASE 4: Process results (NO TIMEOUT LIMITS)
+    // PHASE 4: Process results if completed quickly, otherwise return job ID
     if (status === "completed" && transcript) {
-      console.log("✅ Transcription completed!");
+      console.log("✅ Transcription completed quickly! (INFRASTRUCTURE BYPASS)");
 
       // Process speaker roles
       if (transcript.utterances) {
@@ -443,13 +312,20 @@ export async function POST(request: Request) {
         }));
       }
 
-      // Optional topic categorization (NO TIMEOUT)
-      let categorization = null;
+      // Optional topic categorization (with timeout to avoid infrastructure timeout)
+      let categorization: {
+        primary_category: string;
+        topic_categories: string[];
+        confidence: number;
+      } | null = null;
+      
       if (transcript.utterances && transcript.utterances.length > 0) {
         try {
+          // Use AbortSignal.timeout for better type safety
           categorization = await performTopicCategorization(transcript);
         } catch (catError) {
           console.error("⚠️ Categorization failed:", catError);
+          categorization = null;
         }
         
         transcript.topic_categorization = categorization ? {
@@ -474,7 +350,7 @@ export async function POST(request: Request) {
       }
 
       const totalTime = Date.now() - requestStartTime;
-      console.log(`🎉 TRANSCRIPTION COMPLETE in ${Math.round(totalTime/1000)}s (NO TIMEOUT LIMITS)`);
+      console.log(`🎉 QUICK TRANSCRIPTION COMPLETE in ${Math.round(totalTime/1000)}s (INFRASTRUCTURE BYPASS)`);
 
       return NextResponse.json({
         ...transcript,
@@ -490,20 +366,21 @@ export async function POST(request: Request) {
       }, { status: 500 });
       
     } else {
-      // This should only happen if AssemblyAI never responds or has issues
+      // Transcription is still processing - return job ID for client-side polling
       const totalTime = Date.now() - requestStartTime;
-      console.error(`⚠️ Transcription incomplete after ${Math.round(totalTime/1000)}s, final status: ${status}`);
+      console.log(`⏳ Transcription still processing after ${Math.round(totalTime/1000)}s - returning job ID for client polling (INFRASTRUCTURE BYPASS)`);
       
       return NextResponse.json({
-        error: "Transcription did not complete. This may indicate an issue with AssemblyAI service.",
-        status: status || "unknown",
+        status: "processing",
         transcription_id: id,
-        elapsed_time: Math.round(totalTime/1000),
-      }, { status: 500 });
+        message: "Transcription started successfully. AssemblyAI is processing the file directly from your server.",
+        polling_url: `/api/transcribe/status/${id}`,
+        call_data: callData || null,
+      });
     }
 
   } catch (error) {
-    console.error("💥 TRANSCRIPTION FAILED:", error);
+    console.error("💥 TRANSCRIPTION FAILED (INFRASTRUCTURE BYPASS):", error);
     return NextResponse.json({
       error: "Internal server error",
       message: error instanceof Error ? error.message : "Unknown Error",

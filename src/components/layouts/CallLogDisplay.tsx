@@ -291,7 +291,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // FIXED: Transcription for call recordings (NO TIMEOUTS)
+  // INFRASTRUCTURE BYPASS: Transcription with polling approach
   const initiateTranscription = useCallback(async (log: CallLog) => {
     if (!log.recording_location) return false;
 
@@ -300,11 +300,9 @@ const CallLogDisplay = ({
     // NO TIMEOUT - let transcription run as long as needed
     const controller = new AbortController();
     transcriptionControllers.current.set(contactId, controller);
-    
-    // Only abort if component unmounts (no time-based timeout)
 
     try {
-      console.log(`🚀 Starting transcription for call recording (NO TIMEOUT): ${contactId}`);
+      console.log(`🚀 Starting transcription (INFRASTRUCTURE BYPASS): ${contactId}`);
       
       setCallLogs((prevLogs) =>
         prevLogs.map((l) =>
@@ -312,7 +310,7 @@ const CallLogDisplay = ({
             ? {
                 ...l,
                 transcriptionStatus: "Pending Transcription",
-                transcriptionProgress: 0,
+                transcriptionProgress: 10,
                 transcriptionError: undefined,
               }
             : l
@@ -326,25 +324,9 @@ const CallLogDisplay = ({
         throw new Error("Could not extract filename");
       }
 
-      console.log(`📁 Processing call recording (NO TIMEOUT): ${filename}`);
+      console.log(`📁 Processing call recording (INFRASTRUCTURE BYPASS): ${filename}`);
 
-      // Realistic progress updates for call recordings
-      const progressInterval = setInterval(() => {
-        setCallLogs((prevLogs) =>
-          prevLogs.map((l) => {
-            if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
-              const currentProgress = l.transcriptionProgress || 0;
-              const newProgress = Math.min(85, currentProgress + 1); // Very slow progress to show it's working
-              return { ...l, transcriptionProgress: newProgress };
-            }
-            return l;
-          })
-        );
-      }, 10000); // Every 10 seconds
-
-      progressIntervals.current.set(contactId, progressInterval);
-
-      // Make transcription request (NO TIMEOUT)
+      // Make initial transcription request (this will return quickly with job ID)
       const response = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -384,32 +366,65 @@ const CallLogDisplay = ({
       }
 
       const transcriptionData = await parseApiResponse(response);
-      
-      const hasValidTranscript = transcriptionData && 
-        transcriptionData.status === "completed" &&
-        transcriptionData.text && 
-        transcriptionData.text.trim().length > 0;
 
-      console.log(`✅ Transcription completed for ${contactId}:`, {
-        status: transcriptionData.status,
-        hasText: hasValidTranscript
-      });
+      // Check if transcription completed immediately or if we need to poll
+      if (transcriptionData.status === "completed") {
+        console.log(`✅ Transcription completed immediately for ${contactId}`);
 
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Transcribed",
-                transcriptionProgress: 100,
-                existsInSupabase: true,
-                transcriptionError: undefined,
-              }
-            : l
-        )
-      );
+        setCallLogs((prevLogs) =>
+          prevLogs.map((l) =>
+            l.contact_id === contactId
+              ? {
+                  ...l,
+                  transcriptionStatus: "Transcribed",
+                  transcriptionProgress: 100,
+                  existsInSupabase: true,
+                  transcriptionError: undefined,
+                }
+              : l
+          )
+        );
 
-      return true;
+        return true;
+
+      } else if (transcriptionData.status === "processing" && transcriptionData.transcription_id) {
+        console.log(`⏳ Transcription job started (INFRASTRUCTURE BYPASS): ${transcriptionData.transcription_id}`);
+        
+        // Update progress to show job started
+        setCallLogs((prevLogs) =>
+          prevLogs.map((l) =>
+            l.contact_id === contactId
+              ? {
+                  ...l,
+                  transcriptionProgress: 25,
+                }
+              : l
+          )
+        );
+
+        // Start polling for results
+        const callDataStr = encodeURIComponent(JSON.stringify({
+          contact_id: log.contact_id,
+          agent_username: log.agent_username,
+          recording_location: log.recording_location,
+          initiation_timestamp: log.initiation_timestamp,
+          total_call_time: log.total_call_time,
+          campaign_name: log.campaign_name,
+          campaign_id: log.campaign_id,
+          customer_cli: log.customer_cli,
+          agent_hold_time: log.agent_hold_time,
+          total_hold_time: log.total_hold_time,
+          time_in_queue: log.time_in_queue,
+          queue_name: log.queue_name,
+          disposition_title: log.disposition_title,
+        }));
+
+        return await pollTranscriptionStatus(contactId, transcriptionData.transcription_id, callDataStr);
+
+      } else {
+        throw new Error(`Unexpected transcription response: ${transcriptionData.status}`);
+      }
+
     } catch (error) {
       console.error(`💥 Transcription error for ${contactId}:`, error);
 
@@ -418,8 +433,6 @@ const CallLogDisplay = ({
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
           errorMessage = "Transcription was cancelled.";
-        } else if (error.message.includes('504') || error.message.includes('timeout')) {
-          errorMessage = "Server processing error. The transcription service may be overloaded.";
         } else {
           errorMessage = error.message;
         }
@@ -444,6 +457,116 @@ const CallLogDisplay = ({
       cleanupTranscription(contactId);
     }
   }, [cleanupTranscription]);
+
+  // INFRASTRUCTURE BYPASS: Poll transcription status separately
+  const pollTranscriptionStatus = useCallback(async (contactId: string, jobId: string, callDataStr: string): Promise<boolean> => {
+    console.log(`📊 Starting polling for job: ${jobId}`);
+    
+    let attempts = 0;
+    const maxAttempts = 360; // 30 minutes at 5-second intervals
+    const pollInterval = 5000;
+
+    // Progress simulation during polling
+    const progressInterval = setInterval(() => {
+      setCallLogs((prevLogs) =>
+        prevLogs.map((l) => {
+          if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
+            const currentProgress = l.transcriptionProgress || 25;
+            const newProgress = Math.min(90, currentProgress + 1); // Very slow progress
+            return { ...l, transcriptionProgress: newProgress };
+          }
+          return l;
+        })
+      );
+    }, 15000); // Every 15 seconds
+
+    progressIntervals.current.set(contactId, progressInterval);
+
+    try {
+      while (attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        attempts++;
+
+        try {
+          const statusUrl = `/api/transcribe/status/${jobId}?callData=${callDataStr}`;
+          const statusResponse = await fetch(statusUrl);
+
+          if (!statusResponse.ok) {
+            console.error(`Status check failed: ${statusResponse.status}`);
+            continue;
+          }
+
+          const statusData = await statusResponse.json();
+          
+          if (statusData.status === "completed") {
+            console.log(`✅ Transcription completed for ${contactId} after ${attempts} polls`);
+
+            setCallLogs((prevLogs) =>
+              prevLogs.map((l) =>
+                l.contact_id === contactId
+                  ? {
+                      ...l,
+                      transcriptionStatus: "Transcribed",
+                      transcriptionProgress: 100,
+                      existsInSupabase: true,
+                      transcriptionError: undefined,
+                    }
+                  : l
+              )
+            );
+
+            return true;
+
+          } else if (statusData.status === "error") {
+            throw new Error(statusData.error || "Transcription failed");
+
+          } else {
+            // Still processing - log progress occasionally
+            if (attempts % 12 === 0) { // Every minute
+              console.log(`📊 Job ${jobId} still ${statusData.status} after ${attempts} polls (${Math.round(attempts * pollInterval / 1000)}s)`);
+            }
+          }
+
+        } catch (pollError) {
+          console.error(`Poll error for ${contactId}:`, pollError);
+          
+          // Don't fail immediately on poll errors, retry a few times
+          if (attempts > maxAttempts - 10) {
+            throw pollError;
+          }
+        }
+      }
+
+      // Polling timed out
+      throw new Error(`Transcription polling timed out after ${maxAttempts} attempts (${Math.round(maxAttempts * pollInterval / 1000 / 60)} minutes)`);
+
+    } catch (error) {
+      console.error(`💥 Polling failed for ${contactId}:`, error);
+
+      setCallLogs((prevLogs) =>
+        prevLogs.map((l) =>
+          l.contact_id === contactId
+            ? {
+                ...l,
+                transcriptionStatus: "Failed",
+                transcriptionProgress: undefined,
+                transcriptionError: error instanceof Error ? error.message : "Polling failed",
+              }
+            : l
+        )
+      );
+
+      setFailedTranscriptions(prev => new Set(prev).add(contactId));
+      return false;
+
+    } finally {
+      const interval = progressIntervals.current.get(contactId);
+      if (interval) {
+        clearInterval(interval);
+        progressIntervals.current.delete(contactId);
+      }
+    }
+  }, []);
 
   // Queue management
   const queueTranscription = useCallback((logId: string) => {
@@ -675,7 +798,7 @@ const CallLogDisplay = ({
                 )}
               </div>
               <div className="text-xs text-gray-400 mt-1">
-                📞 Processing call recordings - NO TIME LIMITS (may take 10+ minutes for large files)
+                🚀 INFRASTRUCTURE BYPASS: AssemblyAI downloads directly from your server (no server timeout limits)
               </div>
             </div>
           )}

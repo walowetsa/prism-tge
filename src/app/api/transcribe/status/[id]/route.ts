@@ -12,7 +12,7 @@ async function saveToSupabase(
   categorization: any = null
 ) {
   try {
-    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101:3000";
+    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101";
 
     const payload = {
       contact_id: callData.contact_id,
@@ -65,10 +65,10 @@ function getServerUrl(): string {
   const possibleUrls = [
     process.env.NEXT_PUBLIC_SERVER_URL,
     process.env.NETWORK_URL,
-    'http://192.168.40.101:3000'
+    'http://192.168.40.101'
   ].filter(Boolean) as string[];
   
-  return possibleUrls[0] || 'http://192.168.40.101:3000';
+  return possibleUrls[0] || 'http://192.168.40.101';
 }
 
 /**
@@ -113,10 +113,10 @@ async function performTopicCategorization(transcriptData: any): Promise<{
 
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params; // FIXED: Await params for Next.js 15
     const url = new URL(request.url);
     const callDataParam = url.searchParams.get('callData');
     

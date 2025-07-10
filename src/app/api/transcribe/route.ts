@@ -11,7 +11,7 @@ async function saveToSupabase(
   categorization: any = null
 ) {
   try {
-    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101:3000";
+    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://192.168.40.101";
 
     const payload = {
       contact_id: callData.contact_id,
@@ -64,10 +64,10 @@ function getServerUrl(): string {
   const possibleUrls = [
     process.env.NEXT_PUBLIC_SERVER_URL,
     process.env.NETWORK_URL,
-    'http://192.168.40.101:3000'
+    'http://192.168.40.101'
   ].filter(Boolean) as string[];
   
-  return possibleUrls[0] || 'http://192.168.40.101:3000';
+  return possibleUrls[0] || 'http://192.168.40.101';
 }
 
 // REMOVED: No longer needed with infrastructure bypass approach

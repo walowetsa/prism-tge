@@ -128,30 +128,7 @@ async function getContactLogs(dateRange?: DateRange) {
   }
 }
 
-// Enhanced helper function to check if a single call exists in Supabase
-async function checkSingleCallExistsInSupabase(contactId: string): Promise<boolean> {
-  try {
-    const { data, error } = await supabase
-      .from("call_records")
-      .select("contact_id")
-      .eq("contact_id", contactId)
-      .single();
-
-    if (error && error.code !== "PGRST116") { // PGRST116 = no rows returned
-      console.error(`Error checking single call ${contactId}:`, error);
-      return false; // Assume doesn't exist if we can't check
-    }
-
-    const exists = !!data;
-    console.log(`🔍 Single call check: ${contactId} ${exists ? 'EXISTS' : 'MISSING'} in Supabase`);
-    return exists;
-  } catch (error) {
-    console.error(`Error in single call check for ${contactId}:`, error);
-    return false; // Assume doesn't exist if we can't check
-  }
-}
-
-// Enhanced helper function to check Supabase status with fresh data
+// Helper function to check Supabase status for call logs
 async function enhanceCallLogsWithSupabaseStatus(
   logs: CallLog[]
 ): Promise<CallLog[]> {
@@ -160,7 +137,6 @@ async function enhanceCallLogsWithSupabaseStatus(
 
     const contactIds = logs.map((log) => log.contact_id);
 
-    // Force fresh query with no caching
     const { data: existingRecords, error } = await supabase
       .from("call_records")
       .select("contact_id")
@@ -175,21 +151,10 @@ async function enhanceCallLogsWithSupabaseStatus(
       existingRecords?.map((record) => record.contact_id) || []
     );
 
-    const enhancedLogs = logs.map((log) => ({
+    return logs.map((log) => ({
       ...log,
       existsInSupabase: existingContactIds.has(log.contact_id),
     }));
-
-    console.log(`📊 Supabase status check: ${existingContactIds.size} existing transcriptions out of ${logs.length} total calls`);
-    
-    // Log details about missing calls for debugging
-    const missingCalls = enhancedLogs.filter(log => !log.existsInSupabase && log.recording_location);
-    console.log(`🎯 Missing transcriptions identified: ${missingCalls.length} calls`);
-    if (missingCalls.length > 0 && missingCalls.length <= 10) {
-      console.log(`📋 Missing call IDs: ${missingCalls.map(log => log.contact_id).join(', ')}`);
-    }
-    
-    return enhancedLogs;
   } catch (error) {
     console.error("Error enhancing call logs with Supabase status:", error);
     return logs.map((log) => ({ ...log, existsInSupabase: false }));
@@ -779,12 +744,8 @@ async function saveTranscriptionToSupabase(
   }
 }
 
-// Main API handler with timeout protection
+// Main API handler
 export async function GET(request: NextRequest) {
-  // Set a reasonable timeout for the entire operation
-  const startTime = Date.now();
-  const MAX_EXECUTION_TIME = 110000; // 110 seconds (under most platform limits)
-  
   try {
     const { searchParams } = new URL(request.url);
     const startDate = searchParams.get("startDate");
@@ -795,7 +756,7 @@ export async function GET(request: NextRequest) {
       searchParams.get("maxProcessCount") || "3"
     );
 
-    console.log("🚀 Starting unified call processing workflow with timeout protection");
+    console.log("🚀 Starting unified call processing workflow");
 
     let dateRange: DateRange | undefined;
 
@@ -820,30 +781,18 @@ export async function GET(request: NextRequest) {
       dateRange = { start, end };
     }
 
-    // Helper function to check if we're approaching timeout
-    const checkTimeout = () => {
-      const elapsed = Date.now() - startTime;
-      if (elapsed > MAX_EXECUTION_TIME) {
-        throw new Error(`Operation timeout after ${elapsed}ms`);
-      }
-      return elapsed;
-    };
-
     // Step 1: Get call logs from database
     console.log("📊 Step 1: Fetching call logs from database...");
     let logs = await getContactLogs(dateRange);
     console.log(`Found ${logs.length} call logs`);
-    checkTimeout();
 
-    // Step 2: Check Supabase status (always fresh query)
+    // Step 2: Check Supabase status
     console.log("🔍 Step 2: Checking Supabase for existing transcriptions...");
     logs = await enhanceCallLogsWithSupabaseStatus(logs);
-    checkTimeout();
 
     const missingTranscriptions = logs.filter(
       (log) => !log.existsInSupabase && log.recording_location
     );
-    
     console.log(
       `Found ${missingTranscriptions.length} calls without transcriptions`
     );
@@ -851,10 +800,10 @@ export async function GET(request: NextRequest) {
     let processedCount = 0;
     const errors: any[] = [];
 
-    // Step 3: Process missing transcriptions (if requested) with strict limits
+    // Step 3: Process missing transcriptions (if requested)
     if (processTranscriptions && missingTranscriptions.length > 0) {
       console.log(
-        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions with timeout protection...`
+        `🎵 Step 3: Processing up to ${maxProcessCount} missing transcriptions...`
       );
 
       const apiKey = process.env.ASSEMBLYAI_API_KEY;
@@ -869,41 +818,23 @@ export async function GET(request: NextRequest) {
 
       for (const log of logsToProcess) {
         try {
-          // Check timeout before each call
-          const elapsed = checkTimeout();
-          console.log(`\n🎯 Processing call ${log.contact_id} (${elapsed}ms elapsed)...`);
-
-          // CRITICAL: Double-check if this call already exists in Supabase
-          // This prevents processing calls that might have been processed by another batch
-          console.log(`🔍 Double-checking if ${log.contact_id} already exists in Supabase...`);
-          const alreadyExists = await checkSingleCallExistsInSupabase(log.contact_id);
-          
-          if (alreadyExists) {
-            console.log(`⏭️ SKIPPING ${log.contact_id} - already exists in Supabase`);
-            log.existsInSupabase = true; // Update the log status
-            continue; // Skip to next call
-          }
-          
-          console.log(`✅ ${log.contact_id} confirmed missing - proceeding with transcription`);
+          console.log(`\n🎯 Processing call ${log.contact_id}...`);
 
           // Download audio from SFTP
           console.log("📥 Downloading audio from SFTP...");
           const audioBuffer = await downloadAudioFromSftp(
             log.recording_location
           );
-          checkTimeout();
 
           // Upload to AssemblyAI
           console.log("⬆️ Uploading to AssemblyAI...");
           const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
-          checkTimeout();
 
           // Transcribe audio
           console.log("🎙️ Transcribing audio...");
           const transcript = await transcribeAudio(uploadUrl, 2);
-          checkTimeout();
 
-          // Perform topic categorization (with timeout protection)
+          // Perform topic categorization
           console.log("🏷️ Performing topic categorization...");
           let categorization: {
             primary_category: string;
@@ -913,13 +844,7 @@ export async function GET(request: NextRequest) {
 
           if (transcript.utterances && transcript.utterances.length > 0) {
             try {
-              // Skip categorization if we're running out of time
-              const timeRemaining = MAX_EXECUTION_TIME - (Date.now() - startTime);
-              if (timeRemaining > 30000) { // Only categorize if we have 30+ seconds left
-                categorization = await performTopicCategorization(transcript);
-              } else {
-                console.log("⏰ Skipping categorization due to time constraints");
-              }
+              categorization = await performTopicCategorization(transcript);
             } catch (catError) {
               console.error("⚠️ Categorization failed:", catError);
             }
@@ -937,65 +862,36 @@ export async function GET(request: NextRequest) {
                 };
           }
 
-          // Final check before saving (in case of race conditions)
-          console.log(`🔍 Final check before saving ${log.contact_id}...`);
-          const stillMissing = !(await checkSingleCallExistsInSupabase(log.contact_id));
-          
-          if (!stillMissing) {
-            console.log(`⚠️ Race condition detected: ${log.contact_id} was created during processing - skipping save`);
-            log.existsInSupabase = true;
-          } else {
-            // Save to Supabase
-            console.log("💾 Saving to Supabase...");
-            await saveTranscriptionToSupabase(log, transcript, categorization);
-            checkTimeout();
+          // Save to Supabase
+          console.log("💾 Saving to Supabase...");
+          await saveTranscriptionToSupabase(log, transcript, categorization);
 
-            // Update log status
-            log.existsInSupabase = true;
-            processedCount++;
+          // Update log status
+          log.existsInSupabase = true;
+          processedCount++;
 
-            console.log(`✅ Successfully processed and saved call ${log.contact_id}`);
-          }
+          console.log(`✅ Successfully processed call ${log.contact_id}`);
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           errors.push({
             contact_id: log.contact_id,
             error: error instanceof Error ? error.message : "Unknown error",
           });
-          
-          // If it's a timeout error, break the loop
-          if (error instanceof Error && error.message.includes('timeout')) {
-            console.log("⏰ Breaking processing loop due to timeout");
-            break;
-          }
         }
       }
     }
 
-    // Step 4: Fresh check after processing to get accurate counts (if time permits)
-    try {
-      if (processedCount > 0) {
-        checkTimeout();
-        console.log("🔄 Step 4: Re-checking Supabase status after processing...");
-        logs = await enhanceCallLogsWithSupabaseStatus(logs);
-      }
-    } catch (timeoutError) {
-      console.log("⏰ Skipping final Supabase check due to timeout");
-    }
-
-    // Calculate final summary with fresh data
-    const finalMissingTranscriptions = logs.filter(
-      (log) => !log.existsInSupabase && log.recording_location
-    );
+    // Step 4: Return results
+    console.log("📋 Step 4: Preparing response...");
 
     const summary = {
       totalCalls: logs.length,
       existingTranscriptions: logs.filter((log) => log.existsInSupabase).length,
-      missingTranscriptions: finalMissingTranscriptions.length,
+      missingTranscriptions: logs.filter(
+        (log) => !log.existsInSupabase && log.recording_location
+      ).length,
       processedThisRequest: processedCount,
       errors: errors.length,
-      hasMoreToProcess: finalMissingTranscriptions.length > 0,
-      executionTime: Date.now() - startTime,
     };
 
     console.log("🎉 Unified workflow completed:", summary);
@@ -1015,23 +911,16 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("💥 Unified workflow error:", error);
-    
-    // Check if it's a timeout error
-    const isTimeoutError = error instanceof Error && 
-      (error.message.includes('timeout') || error.message.includes('504'));
-    
     return NextResponse.json(
       {
         success: false,
-        error: isTimeoutError ? "Request timeout - processing takes too long" : "Failed to process calls",
-        errorType: isTimeoutError ? "timeout" : "general",
+        error: "Failed to process calls",
         details:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.message
             : undefined,
-        executionTime: Date.now() - startTime,
       },
-      { status: isTimeoutError ? 408 : 500 }
+      { status: 500 }
     );
   }
 }
@@ -1128,24 +1017,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Fresh check after processing
-    const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
-    const finalMissingTranscriptions = finalEnhancedLogs.filter(
-      (log) => !log.existsInSupabase && log.recording_location
-    );
-
     return NextResponse.json({
       success: true,
-      data: finalEnhancedLogs,
+      data: enhancedLogs,
       summary: {
         requestedCalls: contactIds.length,
         foundCalls: targetLogs.length,
-        existingTranscriptions: finalEnhancedLogs.filter(
+        existingTranscriptions: enhancedLogs.filter(
           (log) => log.existsInSupabase
         ).length,
         processedThisRequest: processedCount,
         errors: errors.length,
-        hasMoreToProcess: finalMissingTranscriptions.length > 0,
       },
       errors: errors.length > 0 ? errors : undefined,
       timestamp: new Date().toISOString(),

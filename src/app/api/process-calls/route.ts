@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// app/api/process-calls/route.ts - Unified call processing workflow
+// app/api/process-calls/route.ts - Unified call processing workflow with duplicate prevention
 
 import { NextRequest, NextResponse } from "next/server";
 import { Pool } from "pg";
@@ -125,6 +125,27 @@ async function getContactLogs(dateRange?: DateRange) {
   } catch (error) {
     console.error("Database query error:", error);
     throw error;
+  }
+}
+
+// NEW: Helper function to check if a single call exists in Supabase
+async function checkCallExistsInSupabase(contactId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from("call_records")
+      .select("contact_id")
+      .eq("contact_id", contactId)
+      .single();
+
+    if (error && error.code !== "PGRST116") {
+      console.error(`Error checking call ${contactId}:`, error);
+      return false;
+    }
+
+    return !!data;
+  } catch (error) {
+    console.error(`Error checking call ${contactId}:`, error);
+    return false;
   }
 }
 
@@ -744,6 +765,37 @@ async function saveTranscriptionToSupabase(
   }
 }
 
+// NEW: Function to get fresh missing transcriptions right before processing
+async function getFreshMissingTranscriptions(
+  dateRange?: DateRange,
+  maxCount?: number
+): Promise<CallLog[]> {
+  try {
+    console.log("🔄 Getting fresh list of missing transcriptions...");
+    
+    // Get call logs from database
+    const logs = await getContactLogs(dateRange);
+    
+    // Check current Supabase status
+    const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(logs);
+    
+    // Filter for missing transcriptions
+    const missingTranscriptions = enhancedLogs.filter(
+      (log) => !log.existsInSupabase && log.recording_location
+    );
+
+    console.log(`Found ${missingTranscriptions.length} fresh missing transcriptions`);
+
+    // Return limited set if maxCount specified
+    return maxCount 
+      ? missingTranscriptions.slice(0, maxCount)
+      : missingTranscriptions;
+  } catch (error) {
+    console.error("Error getting fresh missing transcriptions:", error);
+    return [];
+  }
+}
+
 // Main API handler
 export async function GET(request: NextRequest) {
   try {
@@ -814,11 +866,26 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      const logsToProcess = missingTranscriptions.slice(0, maxProcessCount);
+      // FIXED: Get fresh missing transcriptions right before processing
+      const freshMissingTranscriptions = await getFreshMissingTranscriptions(
+        dateRange,
+        maxProcessCount
+      );
 
-      for (const log of logsToProcess) {
+      console.log(`🎯 Processing ${freshMissingTranscriptions.length} fresh missing transcriptions`);
+
+      for (const log of freshMissingTranscriptions) {
         try {
-          console.log(`\n🎯 Processing call ${log.contact_id}...`);
+          console.log(`\n🔍 Final check for call ${log.contact_id}...`);
+
+          // FIXED: Double-check right before processing each individual call
+          const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
+          if (!stillMissing) {
+            console.log(`⏭️ Call ${log.contact_id} already processed by another batch, skipping...`);
+            continue;
+          }
+
+          console.log(`🎯 Processing call ${log.contact_id}...`);
 
           // Download audio from SFTP
           console.log("📥 Downloading audio from SFTP...");
@@ -862,6 +929,14 @@ export async function GET(request: NextRequest) {
                 };
           }
 
+          // FIXED: Final check before saving to prevent race conditions
+          console.log("🔒 Final check before saving...");
+          const finalCheck = await checkCallExistsInSupabase(log.contact_id);
+          if (finalCheck) {
+            console.log(`⚠️ Call ${log.contact_id} was processed by another batch during processing, skipping save...`);
+            continue;
+          }
+
           // Save to Supabase
           console.log("💾 Saving to Supabase...");
           await saveTranscriptionToSupabase(log, transcript, categorization);
@@ -881,13 +956,14 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Step 4: Return results
-    console.log("📋 Step 4: Preparing response...");
+    // Step 4: Get final fresh status after processing
+    console.log("📋 Step 4: Getting final status after processing...");
+    const finalLogs = await enhanceCallLogsWithSupabaseStatus(logs);
 
     const summary = {
-      totalCalls: logs.length,
-      existingTranscriptions: logs.filter((log) => log.existsInSupabase).length,
-      missingTranscriptions: logs.filter(
+      totalCalls: finalLogs.length,
+      existingTranscriptions: finalLogs.filter((log) => log.existsInSupabase).length,
+      missingTranscriptions: finalLogs.filter(
         (log) => !log.existsInSupabase && log.recording_location
       ).length,
       processedThisRequest: processedCount,
@@ -898,7 +974,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      data: logs,
+      data: finalLogs,
       summary,
       errors: errors.length > 0 ? errors : undefined,
       dateRange: dateRange
@@ -973,6 +1049,15 @@ export async function POST(request: NextRequest) {
 
       for (const log of missingTranscriptions) {
         try {
+          console.log(`🔍 Final check for call ${log.contact_id}...`);
+
+          // FIXED: Double-check right before processing each individual call
+          const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
+          if (!stillMissing) {
+            console.log(`⏭️ Call ${log.contact_id} already processed, skipping...`);
+            continue;
+          }
+
           console.log(`🎯 Processing call ${log.contact_id}...`);
 
           const audioBuffer = await downloadAudioFromSftp(
@@ -1002,6 +1087,13 @@ export async function POST(request: NextRequest) {
                 };
           }
 
+          // FIXED: Final check before saving
+          const finalCheck = await checkCallExistsInSupabase(log.contact_id);
+          if (finalCheck) {
+            console.log(`⚠️ Call ${log.contact_id} was processed during processing, skipping save...`);
+            continue;
+          }
+
           await saveTranscriptionToSupabase(log, transcript, categorization);
           log.existsInSupabase = true;
           processedCount++;
@@ -1017,13 +1109,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Get final status
+    const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
+
     return NextResponse.json({
       success: true,
-      data: enhancedLogs,
+      data: finalEnhancedLogs,
       summary: {
         requestedCalls: contactIds.length,
         foundCalls: targetLogs.length,
-        existingTranscriptions: enhancedLogs.filter(
+        existingTranscriptions: finalEnhancedLogs.filter(
           (log) => log.existsInSupabase
         ).length,
         processedThisRequest: processedCount,

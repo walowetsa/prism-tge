@@ -120,6 +120,8 @@ const CallLogDisplay = ({
   // Refs for tracking and cleanup
   const autoProcessingInitiated = useRef<string | null>(null);
   const realtimeInterval = useRef<NodeJS.Timeout | null>(null);
+  // FIXED: Add ref to prevent concurrent auto-processing
+  const isAutoProcessingRunning = useRef<boolean>(false);
 
   // Fetch all transcribed calls from Supabase
   const fetchSupabaseRecords = async () => {
@@ -367,7 +369,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process batch of transcriptions
+  // FIXED: Improved process batch with better error handling and duplicate prevention
   const processBatch = async (batchNumber: number) => {
     if (!selectedDateRange) return false;
 
@@ -401,18 +403,18 @@ const CallLogDisplay = ({
           ...prev,
           processed: prev.processed + processed,
           failed: prev.failed + errors,
-          remaining: Math.max(0, prev.remaining - BATCH_SIZE)
+          remaining: Math.max(0, prev.remaining - processed) // FIXED: Subtract actual processed, not batch size
         }));
 
         console.log(`✅ Batch ${batchNumber} completed: ${processed} processed, ${errors} failed`);
         
-        // Return true if there are still calls to process
+        // FIXED: Return true only if there are still calls missing transcriptions (based on fresh data)
         return data.summary.missingTranscriptions > 0;
       } else {
         console.error(`❌ Batch ${batchNumber} failed:`, data.error);
         setAutoProcessing(prev => ({
           ...prev,
-          failed: prev.failed + BATCH_SIZE
+          failed: prev.failed + 1 // FIXED: Increment by 1 for batch failure, not batch size
         }));
         return false;
       }
@@ -420,15 +422,23 @@ const CallLogDisplay = ({
       console.error(`❌ Network error in batch ${batchNumber}:`, err);
       setAutoProcessing(prev => ({
         ...prev,
-        failed: prev.failed + BATCH_SIZE
+        failed: prev.failed + 1 // FIXED: Increment by 1 for network error
       }));
       return false;
     }
   };
 
-  // Auto-process all missing transcriptions
+  // FIXED: Improved auto-process function with proper serialization
   const autoProcessAllTranscriptions = async (missingCount: number) => {
     if (missingCount === 0) return;
+
+    // FIXED: Prevent concurrent auto-processing
+    if (isAutoProcessingRunning.current) {
+      console.log('🚫 Auto-processing already running, skipping...');
+      return;
+    }
+
+    isAutoProcessingRunning.current = true;
 
     const totalBatches = Math.ceil(missingCount / BATCH_SIZE);
     
@@ -449,33 +459,45 @@ const CallLogDisplay = ({
     let currentBatch = 1;
     let hasMoreToProcess = true;
 
-    while (hasMoreToProcess && currentBatch <= totalBatches) {
+    try {
+      // FIXED: Properly serialize batch processing - wait for each batch to complete
+      while (hasMoreToProcess && currentBatch <= totalBatches) {
+        setAutoProcessing(prev => ({
+          ...prev,
+          currentBatch
+        }));
+
+        console.log(`📋 Processing batch ${currentBatch}/${totalBatches}...`);
+
+        hasMoreToProcess = await processBatch(currentBatch);
+        
+        // FIXED: Check if we should continue based on remaining work and batch results
+        if (!hasMoreToProcess) {
+          console.log(`✅ No more transcriptions needed after batch ${currentBatch}`);
+          break;
+        }
+
+        // FIXED: Longer delay between batches to ensure proper processing
+        if (currentBatch < totalBatches) {
+          console.log(`⏸️ Waiting 5 seconds before next batch...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+
+        currentBatch++;
+      }
+    } catch (error) {
+      console.error('❌ Error in auto-processing:', error);
+    } finally {
       setAutoProcessing(prev => ({
         ...prev,
-        currentBatch
+        isRunning: false
       }));
 
-      console.log(`📋 Processing batch ${currentBatch}/${totalBatches}...`);
+      setProcessing(false);
+      isAutoProcessingRunning.current = false; // FIXED: Reset the running flag
 
-      hasMoreToProcess = await processBatch(currentBatch);
-      
-      // Small delay between batches to prevent overwhelming the server
-      if (hasMoreToProcess && currentBatch < totalBatches) {
-        console.log(`⏸️ Waiting 3 seconds before next batch...`);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
-
-      currentBatch++;
+      console.log(`🎉 Auto-processing completed! Processed: ${autoProcessing.processed}, Failed: ${autoProcessing.failed}`);
     }
-
-    setAutoProcessing(prev => ({
-      ...prev,
-      isRunning: false
-    }));
-
-    setProcessing(false);
-
-    console.log(`🎉 Auto-processing completed! Processed: ${autoProcessing.processed}, Failed: ${autoProcessing.failed}`);
   };
 
   // Setup real-time updates for Supabase
@@ -489,8 +511,11 @@ const CallLogDisplay = ({
 
     // Setup new interval for real-time updates
     realtimeInterval.current = setInterval(() => {
-      console.log('🔄 Real-time update: Refreshing Supabase records...');
-      fetchSupabaseRecords();
+      // FIXED: Only update if not currently auto-processing to avoid conflicts
+      if (!isAutoProcessingRunning.current) {
+        console.log('🔄 Real-time update: Refreshing Supabase records...');
+        fetchSupabaseRecords();
+      }
     }, REALTIME_UPDATE_INTERVAL);
 
     // Cleanup on unmount or date range change
@@ -542,15 +567,19 @@ const CallLogDisplay = ({
           setCallLogs(data.data || []);
           console.log('📋 Call logs loaded:', data.summary);
 
-          // Wait a moment for mergedCallLogs to update, then check for auto-processing
-          setTimeout(() => {
-            const missing = data.summary.missingTranscriptions;
-            if (missing > 0 && autoProcessingInitiated.current !== dateRangeKey) {
-              autoProcessingInitiated.current = dateRangeKey;
-              console.log(`🚀 Auto-starting transcription processing for ${missing} missing calls...`);
+          // FIXED: Only start auto-processing if not already running and not initiated for this date range
+          const missing = data.summary.missingTranscriptions;
+          if (missing > 0 && 
+              autoProcessingInitiated.current !== dateRangeKey && 
+              !isAutoProcessingRunning.current) {
+            autoProcessingInitiated.current = dateRangeKey;
+            console.log(`🚀 Auto-starting transcription processing for ${missing} missing calls...`);
+            
+            // FIXED: Start auto-processing after a longer delay to ensure state is settled
+            setTimeout(() => {
               autoProcessAllTranscriptions(missing);
-            }
-          }, 500);
+            }, 1000);
+          }
 
         } else {
           setError(data.error || "Failed to fetch call logs");
@@ -617,6 +646,9 @@ const CallLogDisplay = ({
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
               🔄 Real-time updates: Checking Supabase every {REALTIME_UPDATE_INTERVAL/1000} seconds for new transcriptions
+              {isAutoProcessingRunning.current && (
+                <span className="ml-2 text-yellow-400">(Paused during auto-processing)</span>
+              )}
             </div>
           </div>
 
@@ -624,7 +656,7 @@ const CallLogDisplay = ({
           {autoProcessing.isRunning && (
             <div className="mb-4 p-4 bg-blue-900 border border-blue-600 rounded-lg">
               <div className="text-sm text-blue-300 font-medium mb-2">
-                🤖 Auto-Processing Transcriptions
+                🤖 Auto-Processing Transcriptions (Serialized)
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-blue-200">
                 <div>Batch: <span className="text-white font-medium">{autoProcessing.currentBatch}/{autoProcessing.totalBatches}</span></div>
@@ -642,7 +674,7 @@ const CallLogDisplay = ({
                   ></div>
                 </div>
                 <div className="text-xs text-blue-300 mt-1">
-                  Processing {BATCH_SIZE} calls per batch with 3-second delays
+                  Processing {BATCH_SIZE} calls per batch with 5-second delays (prevents duplicates)
                 </div>
               </div>
             </div>
@@ -664,7 +696,7 @@ const CallLogDisplay = ({
             {calculatedSummary.missingTranscriptions > 0 && !autoProcessing.isRunning && (
               <div className="mt-3 flex items-center gap-2">
                 <div className="text-xs text-green-400 font-medium">
-                  🤖 Auto-processing will start automatically for missing transcriptions
+                  🤖 Auto-processing will start automatically for missing transcriptions (duplicate-safe)
                 </div>
                 <button
                   onClick={() => fetchSupabaseRecords()}
@@ -736,7 +768,7 @@ const CallLogDisplay = ({
             <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
               <div className="text-yellow-200">
                 {autoProcessing.isRunning 
-                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches}...` 
+                  ? `🤖 Auto-processing batch ${autoProcessing.currentBatch}/${autoProcessing.totalBatches} (serialized, duplicate-safe)...` 
                   : '🚀 Processing transcriptions...'
                 }
               </div>

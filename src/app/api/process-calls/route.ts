@@ -778,32 +778,72 @@ async function getFreshMissingTranscriptions(
 ): Promise<CallLog[]> {
   try {
     console.log("🔄 Getting fresh list of missing transcriptions...");
-    console.log(`📋 Excluding ${excludeContactIds.length} contact IDs:`, excludeContactIds.slice(0, 5));
+    console.log(`📋 Excluding ${excludeContactIds.length} contact IDs from client`);
+    console.log(`🔒 Currently processing: ${processingCalls.size} calls`);
+    console.log(`🚫 Failed attempts tracked: ${attemptedCalls.size} calls`);
     
     // Get call logs from database
     const logs = await getContactLogs(dateRange);
+    console.log(`📊 Retrieved ${logs.length} total call logs from database`);
     
     // Check current Supabase status
     const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(logs);
     
-    // Filter for missing transcriptions with exclusions
-    const missingTranscriptions = enhancedLogs.filter(
-      (log) => 
-        !log.existsInSupabase && 
-        log.recording_location &&
-        !excludeContactIds.includes(log.contact_id) &&
-        !processingCalls.has(log.contact_id) &&
-        (attemptedCalls.get(log.contact_id) || 0) < MAX_ATTEMPTS
-    );
+    // Count how many already exist in Supabase
+    const alreadyInSupabase = enhancedLogs.filter(log => log.existsInSupabase).length;
+    console.log(`✅ ${alreadyInSupabase} calls already exist in Supabase`);
+    
+    // Filter for missing transcriptions with comprehensive exclusions
+    const missingTranscriptions = enhancedLogs.filter((log) => {
+      // Must not exist in Supabase
+      if (log.existsInSupabase) {
+        return false;
+      }
+      
+      // Must have recording location
+      if (!log.recording_location) {
+        return false;
+      }
+      
+      // Must not be in client exclusion list
+      if (excludeContactIds.includes(log.contact_id)) {
+        console.log(`⚠️ Excluding ${log.contact_id} - in client exclusion list`);
+        return false;
+      }
+      
+      // Must not be currently processing
+      if (processingCalls.has(log.contact_id)) {
+        console.log(`⚠️ Excluding ${log.contact_id} - currently processing`);
+        return false;
+      }
+      
+      // Must not have exceeded retry attempts
+      const attempts = attemptedCalls.get(log.contact_id) || 0;
+      if (attempts >= MAX_ATTEMPTS) {
+        console.log(`⚠️ Excluding ${log.contact_id} - exceeded ${MAX_ATTEMPTS} attempts (${attempts})`);
+        return false;
+      }
+      
+      return true;
+    });
 
-    console.log(`Found ${missingTranscriptions.length} fresh missing transcriptions (after exclusions)`);
+    console.log(`🎯 Found ${missingTranscriptions.length} genuinely missing transcriptions (after all exclusions)`);
+    
+    // Log the first few contact IDs for debugging
+    if (missingTranscriptions.length > 0) {
+      const sampleIds = missingTranscriptions.slice(0, 5).map(log => log.contact_id);
+      console.log(`📝 Sample missing contact IDs: ${sampleIds.join(', ')}`);
+    }
 
     // Return limited set if maxCount specified
-    return maxCount 
+    const result = maxCount 
       ? missingTranscriptions.slice(0, maxCount)
       : missingTranscriptions;
+      
+    console.log(`📤 Returning ${result.length} calls for processing`);
+    return result;
   } catch (error) {
-    console.error("Error getting fresh missing transcriptions:", error);
+    console.error("❌ Error getting fresh missing transcriptions:", error);
     return [];
   }
 }
@@ -914,14 +954,49 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      // FIXED: Get fresh missing transcriptions with exclusions
+      // CRITICAL FIX: Get fresh missing transcriptions with exclusions and validate results
       const freshMissingTranscriptions = await getFreshMissingTranscriptions(
         dateRange,
         maxProcessCount,
         [...processedContactIds, ...excludeContactIds] // Combine local processed + excluded from client
       );
 
-      console.log(`🎯 Processing ${freshMissingTranscriptions.length} fresh missing transcriptions`);
+      console.log(`🎯 After exclusions: ${freshMissingTranscriptions.length} calls to process`);
+
+      // CRITICAL FIX: If no calls to process after exclusions, return early
+      if (freshMissingTranscriptions.length === 0) {
+        console.log(`✅ No calls need processing after exclusions - all work complete`);
+        
+        // Get final status and return
+        const finalLogs = await enhanceCallLogsWithSupabaseStatus(logs);
+        const finalSummary = {
+          totalCalls: finalLogs.length,
+          existingTranscriptions: finalLogs.filter((log) => log.existsInSupabase).length,
+          missingTranscriptions: finalLogs.filter(
+            (log) => !log.existsInSupabase && log.recording_location
+          ).length,
+          processedThisRequest: 0,
+          errors: 0,
+        };
+
+        console.log("🎉 No processing needed - returning current status:", finalSummary);
+        clearProcessingState();
+
+        return NextResponse.json({
+          success: true,
+          data: finalLogs,
+          summary: finalSummary,
+          processedContactIds: [],
+          errors: undefined,
+          dateRange: dateRange
+            ? {
+                start: dateRange.start.toISOString(),
+                end: dateRange.end.toISOString(),
+              }
+            : null,
+          timestamp: new Date().toISOString(),
+        });
+      }
 
       for (const log of freshMissingTranscriptions) {
         try {
@@ -1015,6 +1090,8 @@ export async function GET(request: NextRequest) {
           });
         }
       }
+    } else if (processTranscriptions && missingTranscriptions.length === 0) {
+      console.log("✅ No missing transcriptions found - all calls already processed");
     }
 
     // Step 4: Get final fresh status after processing

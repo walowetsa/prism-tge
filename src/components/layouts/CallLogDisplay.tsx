@@ -32,14 +32,6 @@ interface CallLog {
   transcriptionError?: string;
 }
 
-interface ProcessingSummary {
-  totalCalls: number;
-  existingTranscriptions: number;
-  missingTranscriptions: number;
-  processedThisRequest: number;
-  errors: number;
-}
-
 interface ProcessingError {
   contact_id: string;
   error: string;
@@ -49,6 +41,7 @@ type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' |
 type SortDirection = 'asc' | 'desc';
 
 const ITEMS_PER_PAGE = 100;
+const BATCH_SIZE = 5;
 
 const CallLogDisplay = ({
   selectedDateRange,
@@ -61,14 +54,17 @@ const CallLogDisplay = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [processingSummary, setProcessingSummary] = useState<ProcessingSummary | null>(null);
   const [processingErrors, setProcessingErrors] = useState<ProcessingError[]>([]);
+  const [processedCount, setProcessedCount] = useState(0);
+  const [totalToProcess, setTotalToProcess] = useState(0);
   
   const [selectedAgent, setSelectedAgent] = useState<string>("all");
   const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
+
+  const processingRef = useRef(false);
 
   // Get unique agents from call logs
   const uniqueAgents = useMemo(() => {
@@ -241,64 +237,23 @@ const CallLogDisplay = ({
     }
   };
 
-  // Process missing transcriptions using the unified route
-  const processTranscriptions = async (maxCount: number = 5) => {
-    if (!selectedDateRange) return;
+  // Process transcriptions in batches
+  const processBatch = async (callsToProcess: CallLog[]) => {
+    if (callsToProcess.length === 0) return [];
 
-    setProcessing(true);
-    setProcessingErrors([]);
+    const contactIds = callsToProcess.slice(0, BATCH_SIZE).map(call => call.contact_id);
     
     try {
-      const params = new URLSearchParams({
-        startDate: selectedDateRange.start.toISOString(),
-        endDate: selectedDateRange.end.toISOString(),
-        processTranscriptions: 'true',
-        maxProcessCount: maxCount.toString(),
-      });
+      console.log(`🚀 Processing batch of ${contactIds.length} calls:`, contactIds);
 
-      console.log(`🚀 Starting unified transcription processing (${maxCount} calls)...`);
-
-      const response = await fetch(`/api/process-calls?${params}`);
-      const data = await response.json();
-
-      if (data.success) {
-        // Update call logs with new data
-        const logsWithTranscriptionStatus = data.data.map((log: CallLog) => ({
-          ...log,
-          transcriptionStatus: log.existsInSupabase ? "Transcribed" : "Pending Transcription",
-        }));
-
-        setCallLogs(logsWithTranscriptionStatus);
-        setProcessingSummary(data.summary);
-
-        // Handle processing errors
-        if (data.errors && data.errors.length > 0) {
-          setProcessingErrors(data.errors);
-          console.warn('⚠️ Some transcriptions failed:', data.errors);
-        }
-
-        // Show success message
-        if (data.summary.processedThisRequest > 0) {
-          console.log(`✅ Successfully processed ${data.summary.processedThisRequest} transcriptions`);
-        }
-
-      } else {
-        setError(data.error || "Failed to process transcriptions");
-      }
-    } catch (err) {
-      setError("Network error occurred while processing transcriptions");
-      console.error("Error processing transcriptions:", err);
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  // Process specific call transcription
-  const processSpecificCall = async (contactId: string) => {
-    setProcessing(true);
-    
-    try {
-      console.log(`🎯 Processing specific call: ${contactId}`);
+      // Mark calls as processing
+      setCallLogs(prevLogs => 
+        prevLogs.map(log => 
+          contactIds.includes(log.contact_id) 
+            ? { ...log, transcriptionStatus: "Processing" as const }
+            : log
+        )
+      );
 
       const response = await fetch('/api/process-calls', {
         method: 'POST',
@@ -306,7 +261,7 @@ const CallLogDisplay = ({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          contactIds: [contactId],
+          contactIds,
           processTranscriptions: true
         })
       });
@@ -314,60 +269,112 @@ const CallLogDisplay = ({
       const data = await response.json();
 
       if (data.success) {
-        // Update the specific call log
+        // Update processed calls
         setCallLogs(prevLogs => 
           prevLogs.map(log => {
-            if (log.contact_id === contactId) {
-              const updatedLog = data.data.find((d: CallLog) => d.contact_id === contactId);
-              return updatedLog ? {
+            const updatedLog = data.data.find((d: CallLog) => d.contact_id === log.contact_id);
+            if (updatedLog) {
+              return {
                 ...updatedLog,
-                transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" : "Pending Transcription"
-              } : log;
+                transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" as const : "Pending Transcription" as const
+              };
             }
             return log;
           })
         );
 
-        // Update summary
-        if (processingSummary) {
-          setProcessingSummary(prev => prev ? {
-            ...prev,
-            existingTranscriptions: prev.existingTranscriptions + data.summary.processedThisRequest,
-            missingTranscriptions: prev.missingTranscriptions - data.summary.processedThisRequest,
-            processedThisRequest: prev.processedThisRequest + data.summary.processedThisRequest
-          } : null);
-        }
-
-        console.log(`✅ Successfully processed call ${contactId}`);
+        setProcessedCount(prev => prev + contactIds.length);
+        console.log(`✅ Successfully processed batch: ${contactIds.length} calls`);
+        
+        return [];
       } else {
-        setError(data.error || `Failed to process call ${contactId}`);
+        // Mark failed calls
+        setCallLogs(prevLogs => 
+          prevLogs.map(log => 
+            contactIds.includes(log.contact_id) 
+              ? { ...log, transcriptionStatus: "Failed" as const, transcriptionError: data.error }
+              : log
+          )
+        );
+        
+        const errors = contactIds.map(id => ({ contact_id: id, error: data.error || "Unknown error" }));
+        setProcessingErrors(prev => [...prev, ...errors]);
+        return callsToProcess.slice(BATCH_SIZE);
       }
     } catch (err) {
-      setError(`Network error occurred while processing call ${contactId}`);
-      console.error(`Error processing call ${contactId}:`, err);
-    } finally {
-      setProcessing(false);
+      console.error("Error processing batch:", err);
+      
+      // Mark failed calls
+      setCallLogs(prevLogs => 
+        prevLogs.map(log => 
+          contactIds.includes(log.contact_id) 
+            ? { ...log, transcriptionStatus: "Failed" as const, transcriptionError: "Network error" }
+            : log
+        )
+      );
+      
+      const errors = contactIds.map(id => ({ contact_id: id, error: "Network error" }));
+      setProcessingErrors(prev => [...prev, ...errors]);
+      return callsToProcess.slice(BATCH_SIZE);
     }
   };
 
-  // Fetch call logs using the unified route
+  // Auto-process all missing transcriptions
+  const autoProcessTranscriptions = useCallback(async (logs: CallLog[]) => {
+    if (processingRef.current) return;
+    
+    const callsNeedingTranscription = logs.filter(log => 
+      !log.existsInSupabase && log.recording_location && log.transcriptionStatus !== "Processing"
+    );
+
+    if (callsNeedingTranscription.length === 0) {
+      console.log("✅ No calls need transcription processing");
+      return;
+    }
+
+    processingRef.current = true;
+    setProcessing(true);
+    setProcessingErrors([]);
+    setProcessedCount(0);
+    setTotalToProcess(callsNeedingTranscription.length);
+
+    console.log(`🎯 Starting auto-processing of ${callsNeedingTranscription.length} calls in batches of ${BATCH_SIZE}`);
+
+    let remainingCalls = [...callsNeedingTranscription];
+
+    while (remainingCalls.length > 0 && processingRef.current) {
+      remainingCalls = await processBatch(remainingCalls);
+      
+      // Small delay between batches to avoid overwhelming the server
+      if (remainingCalls.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    console.log(`🏁 Auto-processing completed. Processed: ${callsNeedingTranscription.length - remainingCalls.length}, Remaining: ${remainingCalls.length}`);
+    
+    setProcessing(false);
+    processingRef.current = false;
+  }, []);
+
+  // Fetch call logs and start auto-processing
   useEffect(() => {
     const fetchCallLogs = async () => {
       if (!selectedDateRange) return;
 
       setLoading(true);
       setError(null);
-      setProcessingSummary(null);
       setProcessingErrors([]);
+      processingRef.current = false;
 
       try {
         const params = new URLSearchParams({
           startDate: selectedDateRange.start.toISOString(),
           endDate: selectedDateRange.end.toISOString(),
-          processTranscriptions: 'false', // Just fetch data initially, don't process
+          processTranscriptions: 'false', // Just fetch data initially
         });
 
-        console.log('📊 Fetching call logs with unified route...');
+        console.log('📊 Fetching call logs...');
 
         const response = await fetch(`/api/process-calls?${params}`);
         const data = await response.json();
@@ -379,9 +386,13 @@ const CallLogDisplay = ({
           }));
 
           setCallLogs(logsWithTranscriptionStatus);
-          setProcessingSummary(data.summary);
+          console.log('📋 Call logs loaded, starting auto-processing...');
+          
+          // Start auto-processing after a short delay
+          setTimeout(() => {
+            autoProcessTranscriptions(logsWithTranscriptionStatus);
+          }, 500);
 
-          console.log('📋 Call logs loaded:', data.summary);
         } else {
           setError(data.error || "Failed to fetch call logs");
         }
@@ -394,7 +405,14 @@ const CallLogDisplay = ({
     };
 
     fetchCallLogs();
-  }, [selectedDateRange, checkSupabase]);
+  }, [selectedDateRange, checkSupabase, autoProcessTranscriptions]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      processingRef.current = false;
+    };
+  }, []);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
@@ -433,49 +451,21 @@ const CallLogDisplay = ({
             </h6>
           </div>
 
-          {/* Processing Summary */}
-          {processingSummary && (
-            <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
-              <div className="text-sm text-[#4ecca3] font-medium mb-2">
-                📊 Processing Summary
+          {/* Auto-Processing Status */}
+          {processing && (
+            <div className="mb-4 p-3 bg-blue-900 border border-blue-600 rounded-lg">
+              <div className="text-sm text-blue-300 font-medium mb-2">
+                🚀 Auto-Processing Transcriptions
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
-                <div>Total Calls: <span className="text-white font-medium">{processingSummary.totalCalls}</span></div>
-                <div>Transcribed: <span className="text-green-400 font-medium">{processingSummary.existingTranscriptions}</span></div>
-                <div>Missing: <span className="text-yellow-400 font-medium">{processingSummary.missingTranscriptions}</span></div>
-                <div>Processed: <span className="text-blue-400 font-medium">{processingSummary.processedThisRequest}</span></div>
-                <div>Errors: <span className="text-red-400 font-medium">{processingSummary.errors}</span></div>
+              <div className="text-xs text-blue-200">
+                Processing calls in batches of {BATCH_SIZE}... ({processedCount}/{totalToProcess} completed)
               </div>
-              
-              {processingSummary.missingTranscriptions > 0 && (
-                <div className="mt-3 flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={() => processTranscriptions(5)}
-                    disabled={processing}
-                    className="px-3 py-1 bg-[#4ecca3] text-[#0a101b] rounded text-xs font-medium hover:bg-[#3bb891] disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {processing ? '🔄 Processing...' : '🚀 Process 5 Missing'}
-                  </button>
-                  <button
-                    onClick={() => processTranscriptions(10)}
-                    disabled={processing}
-                    className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {processing ? '🔄 Processing...' : '⚡ Process 10 Missing'}
-                  </button>
-                  <button
-                    onClick={() => processTranscriptions(processingSummary.missingTranscriptions)}
-                    disabled={processing || processingSummary.missingTranscriptions > 20}
-                    className="px-3 py-1 bg-purple-600 text-white rounded text-xs font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title={processingSummary.missingTranscriptions > 20 ? "Too many calls - use smaller batches" : "Process all missing transcriptions"}
-                  >
-                    {processing ? '🔄 Processing...' : `🎯 Process All (${processingSummary.missingTranscriptions})`}
-                  </button>
-                  <div className="text-xs text-gray-400">
-                    🎯 Unified processing: Download → Transcribe → Analyze → Save
-                  </div>
-                </div>
-              )}
+              <div className="w-full bg-blue-800 rounded-full h-2 mt-2">
+                <div 
+                  className="bg-blue-400 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${totalToProcess > 0 ? (processedCount / totalToProcess) * 100 : 0}%` }}
+                />
+              </div>
             </div>
           )}
 
@@ -522,13 +512,7 @@ const CallLogDisplay = ({
 
           {loading && (
             <div className="flex items-center justify-center p-8">
-              <div className="text-gray-500">📊 Loading call logs with unified processing...</div>
-            </div>
-          )}
-
-          {processing && (
-            <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
-              <div className="text-yellow-200">🚀 Processing transcriptions with unified workflow...</div>
+              <div className="text-gray-500">📊 Loading call logs...</div>
             </div>
           )}
 
@@ -669,27 +653,6 @@ const CallLogDisplay = ({
                                 >
                                   View Details
                                 </Link>
-
-                                {!log.existsInSupabase && log.recording_location && (
-                                  <button
-                                    onClick={() => processSpecificCall(log.contact_id)}
-                                    disabled={processing}
-                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors"
-                                    title="Process this specific call transcription"
-                                  >
-                                    {processing ? (
-                                      <>
-                                        <svg className="animate-spin -ml-1 mr-1 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        Processing...
-                                      </>
-                                    ) : (
-                                      '🎯 Process'
-                                    )}
-                                  </button>
-                                )}
                                 
                                 {log.recording_location && (
                                   <button

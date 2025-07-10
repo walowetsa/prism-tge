@@ -27,9 +27,22 @@ interface CallLog {
   queue_name: string;
   disposition_title: string;
   existsInSupabase?: boolean;
-  transcriptionStatus?: "Transcribed" | "Pending Transcription" | "Failed";
+  transcriptionStatus?: "Transcribed" | "Pending Transcription" | "Failed" | "Processing";
   transcriptionProgress?: number;
   transcriptionError?: string;
+}
+
+interface ProcessingSummary {
+  totalCalls: number;
+  existingTranscriptions: number;
+  missingTranscriptions: number;
+  processedThisRequest: number;
+  errors: number;
+}
+
+interface ProcessingError {
+  contact_id: string;
+  error: string;
 }
 
 type SortField = 'agent_username' | 'initiation_timestamp' | 'total_call_time' | 'queue_name' | 'disposition_title';
@@ -47,21 +60,15 @@ const CallLogDisplay = ({
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
+  const [processingSummary, setProcessingSummary] = useState<ProcessingSummary | null>(null);
+  const [processingErrors, setProcessingErrors] = useState<ProcessingError[]>([]);
   
   const [selectedAgent, setSelectedAgent] = useState<string>("all");
   const [sortField, setSortField] = useState<SortField>('initiation_timestamp');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
-
-  // FIXED: Transcription state for call recordings
-  const [transcriptionQueue, setTranscriptionQueue] = useState<string[]>([]);
-  const [activeTranscriptions, setActiveTranscriptions] = useState<Set<string>>(new Set());
-  const [failedTranscriptions, setFailedTranscriptions] = useState<Set<string>>(new Set());
-  const maxConcurrentTranscriptions = 2; // Keep at 2 for server stability
-  
-  const progressIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const transcriptionControllers = useRef<Map<string, AbortController>>(new Map());
 
   // Get unique agents from call logs
   const uniqueAgents = useMemo(() => {
@@ -121,37 +128,6 @@ const CallLogDisplay = ({
     return filteredAndSortedCallLogs.slice(startIndex, endIndex);
   }, [filteredAndSortedCallLogs, currentPage]);
 
-  // Cleanup function for transcription resources
-  const cleanupTranscription = useCallback((contactId: string) => {
-    const interval = progressIntervals.current.get(contactId);
-    if (interval) {
-      clearInterval(interval);
-      progressIntervals.current.delete(contactId);
-    }
-    
-    const controller = transcriptionControllers.current.get(contactId);
-    if (controller) {
-      controller.abort();
-      transcriptionControllers.current.delete(contactId);
-    }
-    
-    setActiveTranscriptions(prev => {
-      const newSet = new Set(prev);
-      newSet.delete(contactId);
-      return newSet;
-    });
-  }, []);
-
-  // Cleanup all transcriptions on unmount
-  useEffect(() => {
-    return () => {
-      progressIntervals.current.forEach(interval => clearInterval(interval));
-      transcriptionControllers.current.forEach(controller => controller.abort());
-      progressIntervals.current.clear();
-      transcriptionControllers.current.clear();
-    };
-  }, []);
-
   const handleSort = (field: SortField) => {
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -161,7 +137,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // FIXED: Audio download for call recordings (NO TIMEOUT)
+  // Audio download function (unchanged from original)
   const handleAudioDownload = async (log: CallLog) => {
     if (!log.recording_location) {
       alert("No audio file available for this call");
@@ -175,11 +151,10 @@ const CallLogDisplay = ({
     setDownloadingAudio(prev => [...prev, contactId]);
 
     try {
-      console.log(`🎵 Downloading call recording (NO TIMEOUT): ${contactId}`);
+      console.log(`🎵 Downloading call recording: ${contactId}`);
 
       const downloadUrl = `/api/sftp/download?filename=${encodeURIComponent(log.recording_location)}`;
       
-      // NO TIMEOUT - let download run as long as needed
       const response = await fetch(downloadUrl);
 
       if (!response.ok) {
@@ -211,7 +186,6 @@ const CallLogDisplay = ({
 
     } catch (error) {
       console.error(`❌ Download error for ${contactId}:`, error);
-      
       alert(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setDownloadingAudio(prev => prev.filter(id => id !== contactId));
@@ -237,7 +211,7 @@ const CallLogDisplay = ({
           Transcribed
         </span>
       );
-    } else if (activeTranscriptions.has(log.contact_id)) {
+    } else if (log.transcriptionStatus === "Processing") {
       return (
         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
           <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1 animate-pulse"></div>
@@ -267,380 +241,135 @@ const CallLogDisplay = ({
     }
   };
 
-  // Helper to safely parse API responses
-  const parseApiResponse = async (response: Response) => {
-    const contentType = response.headers.get('content-type');
+  // Process missing transcriptions using the unified route
+  const processTranscriptions = async (maxCount: number = 5) => {
+    if (!selectedDateRange) return;
+
+    setProcessing(true);
+    setProcessingErrors([]);
     
-    if (contentType && contentType.includes('application/json')) {
-      try {
-        return await response.json();
-      } catch (jsonError) {
-        const text = await response.text();
-        throw new Error(`Invalid JSON response: ${text.substring(0, 200)}...`);
-      }
-    } else {
-      const text = await response.text();
-      
-      if (text.includes('504') || text.includes('Gateway Time-out')) {
-        throw new Error("Server error - may indicate infrastructure timeout (not application timeout).");
-      } else if (text.includes('502') || text.includes('Bad Gateway')) {
-        throw new Error("Server error. Please try again in a moment.");
+    try {
+      const params = new URLSearchParams({
+        startDate: selectedDateRange.start.toISOString(),
+        endDate: selectedDateRange.end.toISOString(),
+        processTranscriptions: 'true',
+        maxProcessCount: maxCount.toString(),
+      });
+
+      console.log(`🚀 Starting unified transcription processing (${maxCount} calls)...`);
+
+      const response = await fetch(`/api/process-calls?${params}`);
+      const data = await response.json();
+
+      if (data.success) {
+        // Update call logs with new data
+        const logsWithTranscriptionStatus = data.data.map((log: CallLog) => ({
+          ...log,
+          transcriptionStatus: log.existsInSupabase ? "Transcribed" : "Pending Transcription",
+        }));
+
+        setCallLogs(logsWithTranscriptionStatus);
+        setProcessingSummary(data.summary);
+
+        // Handle processing errors
+        if (data.errors && data.errors.length > 0) {
+          setProcessingErrors(data.errors);
+          console.warn('⚠️ Some transcriptions failed:', data.errors);
+        }
+
+        // Show success message
+        if (data.summary.processedThisRequest > 0) {
+          console.log(`✅ Successfully processed ${data.summary.processedThisRequest} transcriptions`);
+        }
+
       } else {
-        throw new Error(`Server error. Status: ${response.status}`);
+        setError(data.error || "Failed to process transcriptions");
       }
+    } catch (err) {
+      setError("Network error occurred while processing transcriptions");
+      console.error("Error processing transcriptions:", err);
+    } finally {
+      setProcessing(false);
     }
   };
 
-  // INFRASTRUCTURE BYPASS: Transcription with polling approach
-  const initiateTranscription = useCallback(async (log: CallLog) => {
-    if (!log.recording_location) return false;
-
-    const contactId = log.contact_id;
+  // Process specific call transcription
+  const processSpecificCall = async (contactId: string) => {
+    setProcessing(true);
     
-    // NO TIMEOUT - let transcription run as long as needed
-    const controller = new AbortController();
-    transcriptionControllers.current.set(contactId, controller);
-
     try {
-      console.log(`🚀 Starting transcription (INFRASTRUCTURE BYPASS): ${contactId}`);
-      
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Pending Transcription",
-                transcriptionProgress: 10,
-                transcriptionError: undefined,
-              }
-            : l
-        )
-      );
+      console.log(`🎯 Processing specific call: ${contactId}`);
 
-      const fullPath = log.recording_location;
-      const filename = fullPath.split("/").pop();
-      
-      if (!filename) {
-        throw new Error("Could not extract filename");
-      }
-
-      console.log(`📁 Processing call recording (INFRASTRUCTURE BYPASS): ${filename}`);
-
-      // Make initial transcription request (this will return quickly with job ID)
-      const response = await fetch("/api/transcribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const response = await fetch('/api/process-calls', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          isDirectSftpFile: true,
-          sftpFilename: fullPath,
-          filename: filename,
-          speakerCount: 2,
-          callData: {
-            contact_id: log.contact_id,
-            agent_username: log.agent_username,
-            recording_location: log.recording_location,
-            initiation_timestamp: log.initiation_timestamp,
-            total_call_time: log.total_call_time,
-            campaign_name: log.campaign_name,
-            campaign_id: log.campaign_id,
-            customer_cli: log.customer_cli,
-            agent_hold_time: log.agent_hold_time,
-            total_hold_time: log.total_hold_time,
-            time_in_queue: log.time_in_queue,
-            queue_name: log.queue_name,
-            disposition_title: log.disposition_title,
-          },
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        let errorData;
-        try {
-          errorData = await parseApiResponse(response);
-        } catch (parseError) {
-          throw new Error(`HTTP ${response.status}: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
-        }
-        
-        throw new Error(errorData.error || `HTTP ${response.status}: Transcription failed`);
-      }
-
-      const transcriptionData = await parseApiResponse(response);
-
-      // Check if transcription completed immediately or if we need to poll
-      if (transcriptionData.status === "completed") {
-        console.log(`✅ Transcription completed immediately for ${contactId}`);
-
-        setCallLogs((prevLogs) =>
-          prevLogs.map((l) =>
-            l.contact_id === contactId
-              ? {
-                  ...l,
-                  transcriptionStatus: "Transcribed",
-                  transcriptionProgress: 100,
-                  existsInSupabase: true,
-                  transcriptionError: undefined,
-                }
-              : l
-          )
-        );
-
-        return true;
-
-      } else if (transcriptionData.status === "processing" && transcriptionData.transcription_id) {
-        console.log(`⏳ Transcription job started (INFRASTRUCTURE BYPASS): ${transcriptionData.transcription_id}`);
-        
-        // Update progress to show job started
-        setCallLogs((prevLogs) =>
-          prevLogs.map((l) =>
-            l.contact_id === contactId
-              ? {
-                  ...l,
-                  transcriptionProgress: 25,
-                }
-              : l
-          )
-        );
-
-        // Start polling for results
-        const callDataStr = encodeURIComponent(JSON.stringify({
-          contact_id: log.contact_id,
-          agent_username: log.agent_username,
-          recording_location: log.recording_location,
-          initiation_timestamp: log.initiation_timestamp,
-          total_call_time: log.total_call_time,
-          campaign_name: log.campaign_name,
-          campaign_id: log.campaign_id,
-          customer_cli: log.customer_cli,
-          agent_hold_time: log.agent_hold_time,
-          total_hold_time: log.total_hold_time,
-          time_in_queue: log.time_in_queue,
-          queue_name: log.queue_name,
-          disposition_title: log.disposition_title,
-        }));
-
-        return await pollTranscriptionStatus(contactId, transcriptionData.transcription_id, callDataStr);
-
-      } else {
-        throw new Error(`Unexpected transcription response: ${transcriptionData.status}`);
-      }
-
-    } catch (error) {
-      console.error(`💥 Transcription error for ${contactId}:`, error);
-
-      let errorMessage = "Unknown error";
-      
-      if (error instanceof Error) {
-        if (error.name === 'AbortError') {
-          errorMessage = "Transcription was cancelled.";
-        } else {
-          errorMessage = error.message;
-        }
-      }
-      
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Failed",
-                transcriptionProgress: undefined,
-                transcriptionError: errorMessage,
-              }
-            : l
-        )
-      );
-
-      setFailedTranscriptions(prev => new Set(prev).add(contactId));
-      return false;
-    } finally {
-      cleanupTranscription(contactId);
-    }
-  }, [cleanupTranscription]);
-
-  // INFRASTRUCTURE BYPASS: Poll transcription status separately
-  const pollTranscriptionStatus = useCallback(async (contactId: string, jobId: string, callDataStr: string): Promise<boolean> => {
-    console.log(`📊 Starting polling for job: ${jobId}`);
-    
-    let attempts = 0;
-    const maxAttempts = 360; // 30 minutes at 5-second intervals
-    const pollInterval = 5000;
-
-    // Progress simulation during polling
-    const progressInterval = setInterval(() => {
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) => {
-          if (l.contact_id === contactId && l.transcriptionStatus === "Pending Transcription") {
-            const currentProgress = l.transcriptionProgress || 25;
-            const newProgress = Math.min(90, currentProgress + 1); // Very slow progress
-            return { ...l, transcriptionProgress: newProgress };
-          }
-          return l;
+          contactIds: [contactId],
+          processTranscriptions: true
         })
-      );
-    }, 15000); // Every 15 seconds
+      });
 
-    progressIntervals.current.set(contactId, progressInterval);
+      const data = await response.json();
 
-    try {
-      while (attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        attempts++;
-
-        try {
-          const statusUrl = `/api/transcribe/status/${jobId}?callData=${callDataStr}`;
-          const statusResponse = await fetch(statusUrl);
-
-          if (!statusResponse.ok) {
-            console.error(`Status check failed: ${statusResponse.status}`);
-            continue;
-          }
-
-          const statusData = await statusResponse.json();
-          
-          if (statusData.status === "completed") {
-            console.log(`✅ Transcription completed for ${contactId} after ${attempts} polls`);
-
-            setCallLogs((prevLogs) =>
-              prevLogs.map((l) =>
-                l.contact_id === contactId
-                  ? {
-                      ...l,
-                      transcriptionStatus: "Transcribed",
-                      transcriptionProgress: 100,
-                      existsInSupabase: true,
-                      transcriptionError: undefined,
-                    }
-                  : l
-              )
-            );
-
-            return true;
-
-          } else if (statusData.status === "error") {
-            throw new Error(statusData.error || "Transcription failed");
-
-          } else {
-            // Still processing - log progress occasionally
-            if (attempts % 12 === 0) { // Every minute
-              console.log(`📊 Job ${jobId} still ${statusData.status} after ${attempts} polls (${Math.round(attempts * pollInterval / 1000)}s)`);
+      if (data.success) {
+        // Update the specific call log
+        setCallLogs(prevLogs => 
+          prevLogs.map(log => {
+            if (log.contact_id === contactId) {
+              const updatedLog = data.data.find((d: CallLog) => d.contact_id === contactId);
+              return updatedLog ? {
+                ...updatedLog,
+                transcriptionStatus: updatedLog.existsInSupabase ? "Transcribed" : "Pending Transcription"
+              } : log;
             }
-          }
+            return log;
+          })
+        );
 
-        } catch (pollError) {
-          console.error(`Poll error for ${contactId}:`, pollError);
-          
-          // Don't fail immediately on poll errors, retry a few times
-          if (attempts > maxAttempts - 10) {
-            throw pollError;
-          }
+        // Update summary
+        if (processingSummary) {
+          setProcessingSummary(prev => prev ? {
+            ...prev,
+            existingTranscriptions: prev.existingTranscriptions + data.summary.processedThisRequest,
+            missingTranscriptions: prev.missingTranscriptions - data.summary.processedThisRequest,
+            processedThisRequest: prev.processedThisRequest + data.summary.processedThisRequest
+          } : null);
         }
+
+        console.log(`✅ Successfully processed call ${contactId}`);
+      } else {
+        setError(data.error || `Failed to process call ${contactId}`);
       }
-
-      // Polling timed out
-      throw new Error(`Transcription polling timed out after ${maxAttempts} attempts (${Math.round(maxAttempts * pollInterval / 1000 / 60)} minutes)`);
-
-    } catch (error) {
-      console.error(`💥 Polling failed for ${contactId}:`, error);
-
-      setCallLogs((prevLogs) =>
-        prevLogs.map((l) =>
-          l.contact_id === contactId
-            ? {
-                ...l,
-                transcriptionStatus: "Failed",
-                transcriptionProgress: undefined,
-                transcriptionError: error instanceof Error ? error.message : "Polling failed",
-              }
-            : l
-        )
-      );
-
-      setFailedTranscriptions(prev => new Set(prev).add(contactId));
-      return false;
-
+    } catch (err) {
+      setError(`Network error occurred while processing call ${contactId}`);
+      console.error(`Error processing call ${contactId}:`, err);
     } finally {
-      const interval = progressIntervals.current.get(contactId);
-      if (interval) {
-        clearInterval(interval);
-        progressIntervals.current.delete(contactId);
-      }
+      setProcessing(false);
     }
-  }, []);
+  };
 
-  // Queue management
-  const queueTranscription = useCallback((logId: string) => {
-    setTranscriptionQueue((prev) => {
-      if (prev.includes(logId) || 
-          activeTranscriptions.has(logId) || 
-          failedTranscriptions.has(logId)) {
-        return prev;
-      }
-      return [...prev, logId];
-    });
-  }, [activeTranscriptions, failedTranscriptions]);
-
-  // Process queue
-  useEffect(() => {
-    const processQueue = async () => {
-      if (transcriptionQueue.length === 0) return;
-
-      const availableSlots = maxConcurrentTranscriptions - activeTranscriptions.size;
-      if (availableSlots <= 0) return;
-
-      const logsToProcess = transcriptionQueue.slice(0, availableSlots);
-
-      setTranscriptionQueue((prev) =>
-        prev.filter((id) => !logsToProcess.includes(id))
-      );
-      
-      setActiveTranscriptions((prev) => {
-        const newSet = new Set(prev);
-        logsToProcess.forEach(id => newSet.add(id));
-        return newSet;
-      });
-
-      const transcriptionPromises = logsToProcess.map(async (logId) => {
-        const logToTranscribe = callLogs.find(log => log.contact_id === logId);
-
-        if (!logToTranscribe || !logToTranscribe.recording_location) {
-          setActiveTranscriptions(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(logId);
-            return newSet;
-          });
-          return;
-        }
-
-        try {
-          await initiateTranscription(logToTranscribe);
-        } catch (error) {
-          console.error(`Error processing ${logId}:`, error);
-        }
-      });
-
-      await Promise.allSettled(transcriptionPromises);
-    };
-
-    processQueue();
-  }, [transcriptionQueue, activeTranscriptions, callLogs, initiateTranscription, maxConcurrentTranscriptions]);
-
-  // Fetch call logs
+  // Fetch call logs using the unified route
   useEffect(() => {
     const fetchCallLogs = async () => {
       if (!selectedDateRange) return;
 
       setLoading(true);
       setError(null);
+      setProcessingSummary(null);
+      setProcessingErrors([]);
 
       try {
         const params = new URLSearchParams({
           startDate: selectedDateRange.start.toISOString(),
           endDate: selectedDateRange.end.toISOString(),
-          checkSupabase: checkSupabase.toString(),
+          processTranscriptions: 'false', // Just fetch data initially, don't process
         });
 
-        const response = await fetch(`/api/get-call-logs?${params}`);
+        console.log('📊 Fetching call logs with unified route...');
+
+        const response = await fetch(`/api/process-calls?${params}`);
         const data = await response.json();
 
         if (data.success) {
@@ -650,17 +379,9 @@ const CallLogDisplay = ({
           }));
 
           setCallLogs(logsWithTranscriptionStatus);
-          
-          // Reset transcription state
-          setTranscriptionQueue([]);
-          setActiveTranscriptions(new Set());
-          setFailedTranscriptions(new Set());
-          
-          // Clear intervals and controllers
-          progressIntervals.current.forEach(interval => clearInterval(interval));
-          transcriptionControllers.current.forEach(controller => controller.abort());
-          progressIntervals.current.clear();
-          transcriptionControllers.current.clear();
+          setProcessingSummary(data.summary);
+
+          console.log('📋 Call logs loaded:', data.summary);
         } else {
           setError(data.error || "Failed to fetch call logs");
         }
@@ -674,34 +395,6 @@ const CallLogDisplay = ({
 
     fetchCallLogs();
   }, [selectedDateRange, checkSupabase]);
-
-  // FIXED: Conservative auto-queue for call recordings
-  useEffect(() => {
-    if (!loading && callLogs.length > 0) {
-      const maxAutoQueue = 5; // Conservative for call recordings
-      let queued = 0;
-
-      const totalInProgress = transcriptionQueue.length + activeTranscriptions.size;
-      
-      if (totalInProgress < maxAutoQueue) {
-        paginatedCallLogs.forEach((log) => {
-          if (
-            log.recording_location &&
-            log.transcriptionStatus === "Pending Transcription" &&
-            log.existsInSupabase === false &&
-            !transcriptionQueue.includes(log.contact_id) &&
-            !activeTranscriptions.has(log.contact_id) &&
-            !failedTranscriptions.has(log.contact_id) &&
-            queued < (maxAutoQueue - totalInProgress)
-          ) {
-            console.log(`📋 Auto-queueing call recording: ${log.contact_id}`);
-            queueTranscription(log.contact_id);
-            queued++;
-          }
-        });
-      }
-    }
-  }, [paginatedCallLogs, loading, queueTranscription, transcriptionQueue, activeTranscriptions, failedTranscriptions]);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
@@ -717,30 +410,6 @@ const CallLogDisplay = ({
     if (sortField !== field) return '↕️';
     return sortDirection === 'asc' ? '↑' : '↓';
   };
-
-  // Retry failed transcriptions
-  const retryTranscription = useCallback((contactId: string) => {
-    setFailedTranscriptions(prev => {
-      const newSet = new Set(prev);
-      newSet.delete(contactId);
-      return newSet;
-    });
-    
-    setCallLogs(prevLogs =>
-      prevLogs.map(l =>
-        l.contact_id === contactId
-          ? {
-              ...l,
-              transcriptionStatus: "Pending Transcription",
-              transcriptionProgress: 0,
-              transcriptionError: undefined,
-            }
-          : l
-      )
-    );
-    
-    queueTranscription(contactId);
-  }, [queueTranscription]);
 
   return (
     <div className="flex-1 border-2 p-2 rounded border-border bg-bg-secondary">
@@ -764,6 +433,68 @@ const CallLogDisplay = ({
             </h6>
           </div>
 
+          {/* Processing Summary */}
+          {processingSummary && (
+            <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
+              <div className="text-sm text-[#4ecca3] font-medium mb-2">
+                📊 Processing Summary
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs text-gray-300">
+                <div>Total Calls: <span className="text-white font-medium">{processingSummary.totalCalls}</span></div>
+                <div>Transcribed: <span className="text-green-400 font-medium">{processingSummary.existingTranscriptions}</span></div>
+                <div>Missing: <span className="text-yellow-400 font-medium">{processingSummary.missingTranscriptions}</span></div>
+                <div>Processed: <span className="text-blue-400 font-medium">{processingSummary.processedThisRequest}</span></div>
+                <div>Errors: <span className="text-red-400 font-medium">{processingSummary.errors}</span></div>
+              </div>
+              
+              {processingSummary.missingTranscriptions > 0 && (
+                <div className="mt-3 flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => processTranscriptions(5)}
+                    disabled={processing}
+                    className="px-3 py-1 bg-[#4ecca3] text-[#0a101b] rounded text-xs font-medium hover:bg-[#3bb891] disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {processing ? '🔄 Processing...' : '🚀 Process 5 Missing'}
+                  </button>
+                  <button
+                    onClick={() => processTranscriptions(10)}
+                    disabled={processing}
+                    className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {processing ? '🔄 Processing...' : '⚡ Process 10 Missing'}
+                  </button>
+                  <button
+                    onClick={() => processTranscriptions(processingSummary.missingTranscriptions)}
+                    disabled={processing || processingSummary.missingTranscriptions > 20}
+                    className="px-3 py-1 bg-purple-600 text-white rounded text-xs font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={processingSummary.missingTranscriptions > 20 ? "Too many calls - use smaller batches" : "Process all missing transcriptions"}
+                  >
+                    {processing ? '🔄 Processing...' : `🎯 Process All (${processingSummary.missingTranscriptions})`}
+                  </button>
+                  <div className="text-xs text-gray-400">
+                    🎯 Unified processing: Download → Transcribe → Analyze → Save
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Processing Errors */}
+          {processingErrors.length > 0 && (
+            <div className="mb-4 p-3 bg-red-900 border border-red-600 rounded-lg">
+              <div className="text-sm text-red-300 font-medium mb-2">
+                ⚠️ Processing Errors ({processingErrors.length})
+              </div>
+              <div className="max-h-32 overflow-y-auto">
+                {processingErrors.map((err, index) => (
+                  <div key={index} className="text-xs text-red-200 mb-1">
+                    <span className="font-mono">{err.contact_id}</span>: {err.error}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Agent Filter */}
           {uniqueAgents.length > 0 && (
             <div className="mb-4">
@@ -778,9 +509,10 @@ const CallLogDisplay = ({
                 <option value="all">All Agents ({callLogs.length} calls)</option>
                 {uniqueAgents.map((agent) => {
                   const agentCallCount = callLogs.filter(log => log.agent_username === agent).length;
+                  const transcribedCount = callLogs.filter(log => log.agent_username === agent && log.existsInSupabase).length;
                   return (
                     <option key={agent} value={agent}>
-                      {agent} ({agentCallCount} calls)
+                      {agent} ({agentCallCount} calls, {transcribedCount} transcribed)
                     </option>
                   );
                 })}
@@ -788,29 +520,20 @@ const CallLogDisplay = ({
             </div>
           )}
 
-          {/* Queue status */}
-          {(transcriptionQueue.length > 0 || activeTranscriptions.size > 0 || failedTranscriptions.size > 0) && (
-            <div className="mb-4 p-3 bg-bg-primary border border-border rounded-lg">
-              <div className="text-sm text-[#4ecca3] font-medium">
-                Transcription Status: {activeTranscriptions.size} active, {transcriptionQueue.length} queued
-                {failedTranscriptions.size > 0 && (
-                  <span className="text-red-400 ml-2">({failedTranscriptions.size} failed)</span>
-                )}
-              </div>
-              <div className="text-xs text-gray-400 mt-1">
-                🚀 INFRASTRUCTURE BYPASS: AssemblyAI downloads directly from your server (no server timeout limits)
-              </div>
+          {loading && (
+            <div className="flex items-center justify-center p-8">
+              <div className="text-gray-500">📊 Loading call logs with unified processing...</div>
             </div>
           )}
 
-          {loading && (
-            <div className="flex items-center justify-center p-8">
-              <div className="text-gray-500">Loading call logs...</div>
+          {processing && (
+            <div className="flex items-center justify-center p-4 mb-4 bg-yellow-900 border border-yellow-600 rounded-lg">
+              <div className="text-yellow-200">🚀 Processing transcriptions with unified workflow...</div>
             </div>
           )}
 
           {error && (
-            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
               Error: {error}
             </div>
           )}
@@ -946,14 +669,25 @@ const CallLogDisplay = ({
                                 >
                                   View Details
                                 </Link>
-                                
-                                {log.transcriptionStatus === "Failed" && (
+
+                                {!log.existsInSupabase && log.recording_location && (
                                   <button
-                                    onClick={() => retryTranscription(log.contact_id)}
-                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors"
-                                    title={`Retry transcription (Error: ${log.transcriptionError})`}
+                                    onClick={() => processSpecificCall(log.contact_id)}
+                                    disabled={processing}
+                                    className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 transition-colors"
+                                    title="Process this specific call transcription"
                                   >
-                                    Retry
+                                    {processing ? (
+                                      <>
+                                        <svg className="animate-spin -ml-1 mr-1 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        Processing...
+                                      </>
+                                    ) : (
+                                      '🎯 Process'
+                                    )}
                                   </button>
                                 )}
                                 

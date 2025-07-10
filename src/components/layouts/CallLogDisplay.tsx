@@ -60,7 +60,7 @@ interface AutoProcessingState {
   processed: number;
   failed: number;
   remaining: number;
-  currentCallIndex: number; // NEW: Track which call we're on
+  currentCallIndex: number;
 }
 
 interface SupabaseCallRecord {
@@ -121,11 +121,12 @@ const CallLogDisplay = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [downloadingAudio, setDownloadingAudio] = useState<string[]>([]);
 
-  // NEW: Simple refs for tracking
+  // Enhanced refs for tracking
   const autoProcessingInitiated = useRef<string | null>(null);
   const isAutoProcessingRunning = useRef<boolean>(false);
-  const callsToProcess = useRef<CallLog[]>([]); // NEW: Store all calls that need processing
-  const currentBatchIndex = useRef<number>(0); // NEW: Track which batch we're on
+  const callsToProcess = useRef<CallLog[]>([]);
+  const currentBatchIndex = useRef<number>(0);
+  const dataReadyForProcessing = useRef<boolean>(false); // NEW: Track when data is ready
 
   // Fetch all transcribed calls from Supabase
   const fetchSupabaseRecords = async () => {
@@ -141,25 +142,39 @@ const CallLogDisplay = ({
         setSupabaseRecords(data.data || []);
         setLastSupabaseUpdate(new Date().toISOString());
         console.log(`✅ [${timestamp}] Loaded ${data.data?.length || 0} Supabase records`);
+        return data.data || [];
       } else {
         console.error('Failed to fetch Supabase records:', data.error);
+        return [];
       }
     } catch (err) {
       console.error('Error fetching Supabase records:', err);
+      return [];
     } finally {
       setLoadingSupabase(false);
     }
   };
 
-  // NEW: Function to get calls that need processing (locally) with enhanced debugging
+  // Function to get calls that need processing (locally) with enhanced debugging
   const getCallsNeedingProcessing = useCallback((allCallLogs: CallLog[], allSupabaseRecords: SupabaseCallRecord[]) => {
     console.log(`\n🔍 === ANALYZING CALLS FOR PROCESSING ===`);
     console.log(`📊 Input: ${allCallLogs.length} call logs, ${allSupabaseRecords.length} Supabase records`);
     
+    if (allCallLogs.length === 0) {
+      console.log(`⚠️ No call logs available for analysis`);
+      return [];
+    }
+    
+    if (allSupabaseRecords.length === 0) {
+      console.log(`ℹ️ No Supabase records found - all calls with recordings need processing`);
+    }
+    
     // Create a Set of contact IDs that exist in Supabase
     const supabaseContactIds = new Set(allSupabaseRecords.map(record => record.contact_id));
     console.log(`📋 Contact IDs in Supabase: ${supabaseContactIds.size}`);
-    console.log(`📝 Sample Supabase contact IDs:`, Array.from(supabaseContactIds).slice(0, 5));
+    if (supabaseContactIds.size > 0) {
+      console.log(`📝 Sample Supabase contact IDs:`, Array.from(supabaseContactIds).slice(0, 5));
+    }
     
     // Filter call logs that need processing
     const needsProcessing = allCallLogs.filter(log => {
@@ -409,7 +424,7 @@ const CallLogDisplay = ({
     }
   };
 
-  // NEW: Process a specific batch of calls directly (no API exclusion logic)
+  // Process a specific batch of calls directly
   const processSpecificBatch = async (batchCalls: CallLog[], batchNumber: number) => {
     console.log(`\n🚀 === PROCESSING BATCH ${batchNumber} ===`);
     console.log(`📋 Processing ${batchCalls.length} specific calls:`);
@@ -455,6 +470,18 @@ const CallLogDisplay = ({
           currentCallIndex: prev.currentCallIndex + batchCalls.length
         }));
 
+        // IMPORTANT: Update the callLogs state with the processed results
+        if (processed > 0) {
+          const processedContactIds = new Set(contactIds);
+          setCallLogs(prevLogs => 
+            prevLogs.map(log => 
+              processedContactIds.has(log.contact_id) 
+                ? { ...log, existsInSupabase: true, transcriptionStatus: "Transcribed" as const }
+                : log
+            )
+          );
+        }
+
         return { processed, errors };
       } else {
         console.error(`❌ Batch ${batchNumber} failed:`, data.error);
@@ -474,8 +501,8 @@ const CallLogDisplay = ({
     }
   };
 
-  // NEW: Simple auto-process function that iterates through ALL calls with enhanced debugging
-  const autoProcessAllTranscriptions = async () => {
+  // Enhanced auto-process function with better state management
+  const autoProcessAllTranscriptions = async (forceCallLogs?: CallLog[], forceSupabaseRecords?: SupabaseCallRecord[]) => {
     console.log(`\n🚀 === AUTO-PROCESSING STARTING ===`);
     
     // Check global processing state
@@ -487,15 +514,25 @@ const CallLogDisplay = ({
       return;
     }
 
+    // Use forced data or current state
+    const currentCallLogs = forceCallLogs || callLogs;
+    const currentSupabaseRecords = forceSupabaseRecords || supabaseRecords;
+
     console.log(`📊 Current data state:`);
-    console.log(`   - Call logs: ${callLogs.length}`);
-    console.log(`   - Supabase records: ${supabaseRecords.length}`);
+    console.log(`   - Call logs: ${currentCallLogs.length}`);
+    console.log(`   - Supabase records: ${currentSupabaseRecords.length}`);
+
+    // Check if we have data to work with
+    if (currentCallLogs.length === 0) {
+      console.log('⚠️ No call logs available - stopping auto-processing');
+      return;
+    }
 
     sessionStorage.setItem(GLOBAL_PROCESSING_KEY, Date.now().toString());
     isAutoProcessingRunning.current = true;
 
     // Get all calls that need processing
-    const callsNeedingProcessing = getCallsNeedingProcessing(callLogs, supabaseRecords);
+    const callsNeedingProcessing = getCallsNeedingProcessing(currentCallLogs, currentSupabaseRecords);
     
     if (callsNeedingProcessing.length === 0) {
       console.log('✅ No calls need processing - stopping auto-processing');
@@ -609,7 +646,36 @@ const CallLogDisplay = ({
     setCurrentPage(1);
   }, [selectedAgent, sortField, sortDirection]);
 
-  // Fetch call logs
+  // NEW: Separate effect to trigger auto-processing when both datasets are ready
+  useEffect(() => {
+    const isDataReady = callLogs.length > 0 && !loading && !loadingSupabase && selectedDateRange;
+    
+    if (isDataReady && !dataReadyForProcessing.current && !isAutoProcessingRunning.current) {
+      const dateRangeKey = `${selectedDateRange.start.toISOString()}-${selectedDateRange.end.toISOString()}`;
+      
+      if (autoProcessingInitiated.current !== dateRangeKey) {
+        console.log(`🚀 === DATA READY FOR PROCESSING ===`);
+        console.log(`📊 Call logs: ${callLogs.length}, Supabase records: ${supabaseRecords.length}`);
+        
+        dataReadyForProcessing.current = true;
+        autoProcessingInitiated.current = dateRangeKey;
+        
+        // Start auto-processing with current data
+        setTimeout(() => {
+          console.log(`🚀 Starting auto-processing with ready data...`);
+          autoProcessAllTranscriptions(callLogs, supabaseRecords);
+        }, 1000);
+      }
+    }
+    
+    // Reset data ready flag when date range changes
+    if (!selectedDateRange) {
+      dataReadyForProcessing.current = false;
+      autoProcessingInitiated.current = null;
+    }
+  }, [callLogs, supabaseRecords, loading, loadingSupabase, selectedDateRange]);
+
+  // Main data fetching effect
   useEffect(() => {
     const fetchCallLogs = async () => {
       if (!selectedDateRange) return;
@@ -635,9 +701,12 @@ const CallLogDisplay = ({
         currentCallIndex: 0
       });
 
+      // Reset data ready flag
+      dataReadyForProcessing.current = false;
+
       try {
-        console.log('🔍 Step 1: Fetching Supabase records (ONE TIME ONLY)...');
-        await fetchSupabaseRecords();
+        console.log('🔍 Step 1: Fetching Supabase records...');
+        const supabaseData = await fetchSupabaseRecords();
 
         console.log('📊 Step 2: Fetching call logs from database...');
         const params = new URLSearchParams({
@@ -652,24 +721,7 @@ const CallLogDisplay = ({
         if (data.success) {
           setCallLogs(data.data || []);
           console.log('📋 Call logs loaded:', data.summary);
-
-          const shouldStartAutoProcessing = (
-            autoProcessingInitiated.current !== dateRangeKey && 
-            !isAutoProcessingRunning.current
-          );
-          
-          if (shouldStartAutoProcessing) {
-            autoProcessingInitiated.current = dateRangeKey;
-            console.log(`🚀 Will start auto-processing after data loads...`);
-            
-            // Start auto-processing after a delay to ensure state is settled
-            setTimeout(() => {
-              if (!isAutoProcessingRunning.current) {
-                autoProcessAllTranscriptions();
-              }
-            }, 2000);
-          }
-
+          console.log('✅ Both datasets loaded, auto-processing will start via effect');
         } else {
           setError(data.error || "Failed to fetch call logs");
         }
@@ -682,7 +734,7 @@ const CallLogDisplay = ({
     };
 
     fetchCallLogs();
-  }, [selectedDateRange, checkSupabase, getCallsNeedingProcessing]);
+  }, [selectedDateRange, checkSupabase]);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
@@ -734,9 +786,12 @@ const CallLogDisplay = ({
           {/* Status Banner */}
           <div className="mb-4 p-2 bg-blue-900 border border-blue-600 rounded-lg">
             <div className="text-xs text-blue-300">
-              📊 Simple approach: Load all data once, then process ALL calls that need transcription (no repeated checking)
+              📊 FIXED: Load all data first, then process ALL calls that need transcription automatically
               {isAutoProcessingRunning.current && (
                 <span className="ml-2 text-yellow-400">(Currently processing)</span>
+              )}
+              {dataReadyForProcessing.current && !isAutoProcessingRunning.current && (
+                <span className="ml-2 text-green-400">(Data ready ✅)</span>
               )}
             </div>
           </div>

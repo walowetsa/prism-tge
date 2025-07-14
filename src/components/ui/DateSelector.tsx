@@ -41,6 +41,8 @@ const DateSelector = ({
       while (currentWeekStart <= currentDate) {
         const weekEnd = new Date(currentWeekStart);
         weekEnd.setDate(weekEnd.getDate() + 6);
+        // FIXED: Set end date to end of day to include all calls on the last day
+        weekEnd.setHours(23, 59, 59, 999);
 
         // Don't include future weeks
         if (currentWeekStart <= currentDate) {

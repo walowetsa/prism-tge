@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// app/api/process-calls/route.ts - Unified call processing workflow with improved audio file handling
+// app/api/process-calls/route.ts - Unified call processing workflow with duplicate prevention
 
 import { NextRequest, NextResponse } from "next/server";
 import { Pool } from "pg";
@@ -93,39 +93,6 @@ interface TranscriptionData {
   primary_category?: string | null;
 }
 
-// Helper function to validate recording location
-function isValidRecordingLocation(recordingLocation: string): boolean {
-  if (!recordingLocation || recordingLocation.trim() === '') {
-    return false;
-  }
-  
-  // Check if it looks like a file path or filename
-  const hasFileExtension = /\.(wav|mp3|m4a|aac|flac)$/i.test(recordingLocation);
-  const hasValidChars = /^[a-zA-Z0-9._\-\/\\:]+$/.test(recordingLocation);
-  
-  return hasFileExtension && hasValidChars;
-}
-
-// Simplified helper function - use recording_location exactly as stored
-function getCleanSftpPath(recordingLocation: string): string {
-  console.log(`🔍 Processing recording location: ${recordingLocation}`);
-  
-  // Try to decode if it's URL encoded
-  let cleanPath = recordingLocation;
-  try {
-    const decoded = decodeURIComponent(recordingLocation);
-    if (decoded !== recordingLocation) {
-      console.log(`📝 Decoded path: ${decoded}`);
-      cleanPath = decoded;
-    }
-  } catch (error) {
-    console.log(`⚠️ Could not decode path, using as-is: ${recordingLocation}`);
-  }
-
-  console.log(`📁 Final path to use: ${cleanPath}`);
-  return cleanPath;
-}
-
 // Helper function to get contact logs from database
 async function getContactLogs(dateRange?: DateRange) {
   try {
@@ -161,7 +128,7 @@ async function getContactLogs(dateRange?: DateRange) {
   }
 }
 
-// Helper function to check if a single call exists in Supabase
+// NEW: Helper function to check if a single call exists in Supabase
 async function checkCallExistsInSupabase(contactId: string): Promise<boolean> {
   try {
     const { data, error } = await supabase
@@ -238,14 +205,64 @@ async function enhanceCallLogsWithSupabaseStatus(
   }
 }
 
-// Simplified helper function to download audio file from SFTP using exact path
-async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer> {
-  const sftpConfig = getSftpConfig();
+// Helper function to construct SFTP paths
+function constructSftpPath(filename: string): string[] {
+  const possiblePaths = [];
 
-  // Validate the recording location first
-  if (!isValidRecordingLocation(recordingLocation)) {
-    throw new Error(`Invalid recording location format: ${recordingLocation}`);
+  let decodedFilename = filename;
+  try {
+    decodedFilename = decodeURIComponent(filename);
+  } catch (error) {
+    console.log(`Could not decode filename: ${filename}`);
   }
+
+  if (decodedFilename.includes("/")) {
+    let cleanPath = decodedFilename;
+
+    if (cleanPath.startsWith("amazon-connect-b1a9c08821e5/")) {
+      cleanPath = cleanPath.replace("amazon-connect-b1a9c08821e5/", "");
+    }
+
+    if (!cleanPath.startsWith("./") && !cleanPath.startsWith("/")) {
+      cleanPath = `./${cleanPath}`;
+    }
+
+    possiblePaths.push(cleanPath);
+
+    if (cleanPath.startsWith("./")) {
+      possiblePaths.push(cleanPath.substring(2));
+    }
+  }
+
+  const justFilename = decodedFilename.split("/").pop() || decodedFilename;
+
+  // Try current date and previous 7 days
+  const currentDate = new Date();
+  for (let daysBack = 0; daysBack <= 7; daysBack++) {
+    const targetDate = new Date(currentDate);
+    targetDate.setDate(currentDate.getDate() - daysBack);
+
+    const year = targetDate.getFullYear();
+    const month = targetDate.getMonth() + 1;
+    const day = targetDate.getDate();
+
+    const datePath = `${year}/${month.toString().padStart(2, "0")}/${day
+      .toString()
+      .padStart(2, "0")}`;
+
+    possiblePaths.push(`./${datePath}/${justFilename}`);
+    possiblePaths.push(`${datePath}/${justFilename}`);
+  }
+
+  possiblePaths.push(`./${justFilename}`);
+  possiblePaths.push(justFilename);
+
+  return Array.from(new Set(possiblePaths));
+}
+
+// Helper function to download audio file from SFTP
+async function downloadAudioFromSftp(filename: string): Promise<Buffer> {
+  const sftpConfig = getSftpConfig();
 
   return new Promise<Buffer>((resolve, reject) => {
     const conn = new Client();
@@ -265,7 +282,7 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
     };
 
     conn.on("ready", () => {
-      console.log(`🔗 SFTP connection ready for ${recordingLocation}`);
+      console.log("SFTP connection ready for", filename);
 
       conn.sftp((err, sftp) => {
         if (err) {
@@ -279,20 +296,35 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
         }
 
         sftpSession = sftp;
-        
-        // Use the recording location exactly as stored in the database
-        const filePath = getCleanSftpPath(recordingLocation);
-        
-        console.log(`🔍 Attempting to access file at: ${filePath}`);
+        const possiblePaths = constructSftpPath(filename);
+        console.log(`Searching ${possiblePaths.length} paths for ${filename}`);
 
-        const downloadFile = async () => {
+        let pathIndex = 0;
+
+        const tryNextPath = async () => {
           if (resolved) return;
 
+          if (pathIndex >= possiblePaths.length) {
+            console.error(`File not found in ${possiblePaths.length} paths`);
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              reject(new Error("Audio file not found"));
+            }
+            return;
+          }
+
+          const currentPath = possiblePaths[pathIndex];
+          console.log(
+            `Trying path ${pathIndex + 1}/${
+              possiblePaths.length
+            }: ${currentPath}`
+          );
+
           try {
-            // Check if file exists and get its stats
             const stats = await new Promise<any>(
               (resolveStats, rejectStats) => {
-                sftp.stat(filePath, (statErr, statsResult) => {
+                sftp.stat(currentPath, (statErr, statsResult) => {
                   if (statErr) {
                     rejectStats(statErr);
                   } else {
@@ -303,29 +335,33 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
             );
 
             const sizeInMB = stats.size / (1024 * 1024);
-            console.log(`✅ Found file: ${sizeInMB.toFixed(2)}MB`);
+            console.log(`Found file: ${sizeInMB.toFixed(2)}MB`);
 
             if (stats.size === 0) {
-              throw new Error(`File exists but is empty (0 bytes)`);
+              console.log(`Empty file, trying next`);
+              pathIndex++;
+              return tryNextPath();
             }
 
-            if (stats.size < 1000) { // Very small threshold for audio files
-              console.warn(`⚠️ Warning: File is very small: ${stats.size} bytes`);
+            if (stats.size < 10000) {
+              console.log(`File too small: ${stats.size} bytes`);
+              pathIndex++;
+              return tryNextPath();
             }
 
-            console.log(`📥 Downloading ${stats.size} bytes from: ${filePath}`);
+            console.log(`Downloading ${stats.size} bytes`);
 
             const fileData = await new Promise<Buffer>(
               (resolveDownload, rejectDownload) => {
                 const fileBuffers: Buffer[] = [];
                 let totalBytesReceived = 0;
 
-                const readStream = sftp.createReadStream(filePath, {
+                const readStream = sftp.createReadStream(currentPath, {
                   highWaterMark: 256 * 1024,
                 });
 
                 readStream.on("error", (readErr: Error) => {
-                  console.error(`❌ Stream error: ${readErr.message}`);
+                  console.error(`Stream error: ${readErr.message}`);
                   rejectDownload(readErr);
                 });
 
@@ -333,14 +369,13 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
                   fileBuffers.push(chunk);
                   totalBytesReceived += chunk.length;
 
-                  // Log progress for larger files
-                  if (stats.size > 1024 * 1024 && totalBytesReceived % (1024 * 1024) < chunk.length) {
+                  if (totalBytesReceived % (1024 * 1024) < chunk.length) {
                     const progress = (
                       (totalBytesReceived / stats.size) *
                       100
                     ).toFixed(0);
                     console.log(
-                      `📊 Progress: ${progress}% (${(
+                      `Progress: ${progress}% (${(
                         totalBytesReceived /
                         (1024 * 1024)
                       ).toFixed(1)}MB)`
@@ -350,7 +385,7 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
 
                 readStream.on("end", () => {
                   const audioBuffer = Buffer.concat(fileBuffers);
-                  console.log(`✅ Download completed: ${audioBuffer.length} bytes`);
+                  console.log(`Downloaded: ${audioBuffer.length} bytes`);
 
                   if (audioBuffer.length !== stats.size) {
                     rejectDownload(
@@ -370,29 +405,28 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
               cleanup();
               resolve(fileData);
             }
+            return;
           } catch (error) {
-            console.error(`❌ Error accessing file at ${filePath}:`, error);
-            
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              
-              const errorMessage = error instanceof Error ? error.message : "Unknown error";
-              reject(new Error(`Could not access audio file at "${filePath}": ${errorMessage}. Please verify the recording location is correct.`));
-            }
+            console.log(
+              `Error with path ${pathIndex + 1}: ${
+                error instanceof Error ? error.message : "Unknown"
+              }`
+            );
+            pathIndex++;
+            setTimeout(tryNextPath, 200);
           }
         };
 
-        downloadFile();
+        tryNextPath();
       });
     });
 
     conn.on("error", (err) => {
-      console.error("❌ SFTP connection error:", err.message);
+      console.error("SFTP connection error:", err.message);
       if (!resolved) {
         resolved = true;
         cleanup();
-        reject(new Error(`SFTP connection failed: ${err.message}`));
+        reject(new Error("SFTP connection failed"));
       }
     });
 
@@ -407,7 +441,7 @@ async function downloadAudioFromSftp(recordingLocation: string): Promise<Buffer>
         tryKeyboard: false,
       });
     } catch (e) {
-      console.error("❌ Connection setup error:", e);
+      console.error("Connection setup error:", e);
       if (!resolved) {
         resolved = true;
         reject(new Error("Failed to initialize SFTP connection"));
@@ -421,7 +455,7 @@ async function uploadToAssemblyAI(
   audioBuffer: Buffer,
   apiKey: string
 ): Promise<string> {
-  console.log("📤 Uploading audio to AssemblyAI...");
+  console.log("Uploading audio to AssemblyAI...");
 
   // Convert Buffer to Uint8Array for fetch compatibility
   const uint8Array = new Uint8Array(audioBuffer);
@@ -443,7 +477,7 @@ async function uploadToAssemblyAI(
   }
 
   const { upload_url } = await uploadResponse.json();
-  console.log("✅ Audio uploaded to AssemblyAI successfully");
+  console.log("Audio uploaded to AssemblyAI successfully");
   return upload_url;
 }
 
@@ -493,7 +527,7 @@ async function transcribeAudio(
 ): Promise<any> {
   const apiKey = process.env.ASSEMBLYAI_API_KEY!;
 
-  console.log("📝 Submitting transcription to AssemblyAI...");
+  console.log("Submitting transcription to AssemblyAI...");
 
   const transcriptResponse = await fetch(
     "https://api.assemblyai.com/v2/transcript",
@@ -594,7 +628,7 @@ async function transcribeAudio(
   }
 
   const { id } = await transcriptResponse.json();
-  console.log(`🆔 Transcription job created: ${id}`);
+  console.log(`Transcription job created: ${id}`);
 
   // Poll for completion
   let transcript;
@@ -626,7 +660,7 @@ async function transcribeAudio(
 
     if (attempts % 12 === 0) {
       // Log every minute
-      console.log(`⏱️ Transcription status after ${attempts * 5}s: ${status}`);
+      console.log(`Transcription status after ${attempts * 5}s: ${status}`);
     }
 
     if (status === "completed" || status === "error") {
@@ -646,7 +680,7 @@ async function transcribeAudio(
     );
   }
 
-  console.log("✅ Transcription completed successfully");
+  console.log("Transcription completed successfully");
 
   // Process speaker roles
   if (transcript.utterances) {
@@ -711,7 +745,7 @@ async function saveTranscriptionToSupabase(
     };
 
     console.log(
-      "💾 Saving transcription to Supabase for contact_id:",
+      "Saving transcription to Supabase for contact_id:",
       payload.contact_id
     );
 
@@ -737,7 +771,7 @@ async function saveTranscriptionToSupabase(
         throw new Error(`Failed to update record: ${error.message}`);
       }
 
-      console.log("✅ Successfully updated existing record");
+      console.log("Successfully updated existing record");
     } else {
       // Insert new record
       const { error } = await supabase.from("call_records").insert([payload]);
@@ -746,20 +780,20 @@ async function saveTranscriptionToSupabase(
         throw new Error(`Failed to insert record: ${error.message}`);
       }
 
-      console.log("✅ Successfully inserted new record");
+      console.log("Successfully inserted new record");
     }
   } catch (error) {
-    console.error("❌ Error saving to Supabase:", error);
+    console.error("Error saving to Supabase:", error);
     throw error;
   }
 }
 
-// In-memory tracking for processing calls to prevent duplicates
+// NEW: In-memory tracking for processing calls to prevent duplicates
 const processingCalls = new Set<string>();
 const attemptedCalls = new Map<string, number>(); // contact_id -> attempt count
 const MAX_ATTEMPTS = 3;
 
-// Function to get fresh missing transcriptions with exclusions
+// NEW: Function to get fresh missing transcriptions with exclusions
 async function getFreshMissingTranscriptions(
   dateRange?: DateRange,
   maxCount?: number,
@@ -789,11 +823,8 @@ async function getFreshMissingTranscriptions(
         return false;
       }
       
-      // Must have recording location and it must be valid
-      if (!log.recording_location || !isValidRecordingLocation(log.recording_location)) {
-        if (log.recording_location) {
-          console.log(`⚠️ Invalid recording location for ${log.contact_id}: ${log.recording_location}`);
-        }
+      // Must have recording location
+      if (!log.recording_location) {
         return false;
       }
       
@@ -825,12 +856,6 @@ async function getFreshMissingTranscriptions(
     if (missingTranscriptions.length > 0) {
       const sampleIds = missingTranscriptions.slice(0, 5).map(log => log.contact_id);
       console.log(`📝 Sample missing contact IDs: ${sampleIds.join(', ')}`);
-      
-      // Also log their recording locations for debugging
-      console.log(`📁 Sample recording locations:`);
-      missingTranscriptions.slice(0, 3).forEach((log, index) => {
-        console.log(`   ${index + 1}. ${log.contact_id}: ${log.recording_location}`);
-      });
     }
 
     // Return limited set if maxCount specified
@@ -846,13 +871,13 @@ async function getFreshMissingTranscriptions(
   }
 }
 
-// Function to mark call as being processed
+// NEW: Function to mark call as being processed
 function markCallAsProcessing(contactId: string) {
   processingCalls.add(contactId);
   console.log(`🔒 Marked ${contactId} as processing`);
 }
 
-// Function to unmark call as being processed
+// NEW: Function to unmark call as being processed
 function unmarkCallAsProcessing(contactId: string, success: boolean = false) {
   processingCalls.delete(contactId);
   
@@ -866,7 +891,7 @@ function unmarkCallAsProcessing(contactId: string, success: boolean = false) {
   }
 }
 
-// Function to clear processing state (for cleanup)
+// NEW: Function to clear processing state (for cleanup)
 function clearProcessingState() {
   processingCalls.clear();
   attemptedCalls.clear();
@@ -884,7 +909,7 @@ export async function GET(request: NextRequest) {
     const maxProcessCount = parseInt(
       searchParams.get("maxProcessCount") || "3"
     );
-    // Get excluded contact IDs from query params
+    // NEW: Get excluded contact IDs from query params
     const excludeContactIdsParam = searchParams.get("excludeContactIds");
     const excludeContactIds = excludeContactIdsParam 
       ? excludeContactIdsParam.split(',').filter(id => id.trim() !== '')
@@ -928,15 +953,15 @@ export async function GET(request: NextRequest) {
     logs = await enhanceCallLogsWithSupabaseStatus(logs);
 
     const missingTranscriptions = logs.filter(
-      (log) => !log.existsInSupabase && log.recording_location && isValidRecordingLocation(log.recording_location)
+      (log) => !log.existsInSupabase && log.recording_location
     );
     console.log(
-      `Found ${missingTranscriptions.length} calls without transcriptions (with valid recording locations)`
+      `Found ${missingTranscriptions.length} calls without transcriptions`
     );
 
     let processedCount = 0;
     const errors: any[] = [];
-    const processedContactIds: string[] = []; // Track which calls we've processed
+    const processedContactIds: string[] = []; // NEW: Track which calls we've processed
 
     // Step 3: Process missing transcriptions (if requested)
     if (processTranscriptions && missingTranscriptions.length > 0) {
@@ -952,7 +977,7 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      // Get fresh missing transcriptions with exclusions and validate results
+      // CRITICAL FIX: Get fresh missing transcriptions with exclusions and validate results
       const freshMissingTranscriptions = await getFreshMissingTranscriptions(
         dateRange,
         maxProcessCount,
@@ -961,7 +986,7 @@ export async function GET(request: NextRequest) {
 
       console.log(`🎯 After exclusions: ${freshMissingTranscriptions.length} calls to process`);
 
-      // If no calls to process after exclusions, return early
+      // CRITICAL FIX: If no calls to process after exclusions, return early
       if (freshMissingTranscriptions.length === 0) {
         console.log(`✅ No calls need processing after exclusions - all work complete`);
         
@@ -971,7 +996,7 @@ export async function GET(request: NextRequest) {
           totalCalls: finalLogs.length,
           existingTranscriptions: finalLogs.filter((log) => log.existsInSupabase).length,
           missingTranscriptions: finalLogs.filter(
-            (log) => !log.existsInSupabase && log.recording_location && isValidRecordingLocation(log.recording_location)
+            (log) => !log.existsInSupabase && log.recording_location
           ).length,
           processedThisRequest: 0,
           errors: 0,
@@ -999,23 +1024,24 @@ export async function GET(request: NextRequest) {
       for (const log of freshMissingTranscriptions) {
         try {
           console.log(`\n🔍 Final check for call ${log.contact_id}...`);
-          console.log(`📁 Recording location: ${log.recording_location}`);
 
-          // Double-check right before processing each individual call
+          // FIXED: Double-check right before processing each individual call
           const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
           if (!stillMissing) {
             console.log(`⏭️ Call ${log.contact_id} already processed by another batch, skipping...`);
             continue;
           }
 
-          // Mark call as being processed
+          // NEW: Mark call as being processed
           markCallAsProcessing(log.contact_id);
 
           console.log(`🎯 Processing call ${log.contact_id}...`);
 
-          // Download audio from SFTP (using exact recording location)
+          // Download audio from SFTP
           console.log("📥 Downloading audio from SFTP...");
-          const audioBuffer = await downloadAudioFromSftp(log.recording_location);
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
 
           // Upload to AssemblyAI
           console.log("⬆️ Uploading to AssemblyAI...");
@@ -1053,7 +1079,7 @@ export async function GET(request: NextRequest) {
                 };
           }
 
-          // Final check before saving to prevent race conditions
+          // FIXED: Final check before saving to prevent race conditions
           console.log("🔒 Final check before saving...");
           const finalCheck = await checkCallExistsInSupabase(log.contact_id);
           if (finalCheck) {
@@ -1069,21 +1095,20 @@ export async function GET(request: NextRequest) {
           // Update log status
           log.existsInSupabase = true;
           processedCount++;
-          processedContactIds.push(log.contact_id); // Track this as processed
+          processedContactIds.push(log.contact_id); // NEW: Track this as processed
 
-          // Mark as successfully processed
+          // NEW: Mark as successfully processed
           unmarkCallAsProcessing(log.contact_id, true);
 
           console.log(`✅ Successfully processed call ${log.contact_id}`);
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           
-          // Unmark as processing on error
+          // NEW: Unmark as processing on error
           unmarkCallAsProcessing(log.contact_id, false);
           
           errors.push({
             contact_id: log.contact_id,
-            recording_location: log.recording_location,
             error: error instanceof Error ? error.message : "Unknown error",
           });
         }
@@ -1100,7 +1125,7 @@ export async function GET(request: NextRequest) {
       totalCalls: finalLogs.length,
       existingTranscriptions: finalLogs.filter((log) => log.existsInSupabase).length,
       missingTranscriptions: finalLogs.filter(
-        (log) => !log.existsInSupabase && log.recording_location && isValidRecordingLocation(log.recording_location)
+        (log) => !log.existsInSupabase && log.recording_location
       ).length,
       processedThisRequest: processedCount,
       errors: errors.length,
@@ -1108,14 +1133,14 @@ export async function GET(request: NextRequest) {
 
     console.log("🎉 Unified workflow completed:", summary);
 
-    // Clear processing state on completion
+    // NEW: Clear processing state on completion
     clearProcessingState();
 
     return NextResponse.json({
       success: true,
       data: finalLogs,
       summary,
-      processedContactIds, // Return processed contact IDs for frontend tracking
+      processedContactIds, // NEW: Return processed contact IDs for frontend tracking
       errors: errors.length > 0 ? errors : undefined,
       dateRange: dateRange
         ? {
@@ -1128,7 +1153,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error("💥 Unified workflow error:", error);
     
-    // Clear processing state on error
+    // NEW: Clear processing state on error
     clearProcessingState();
     
     return NextResponse.json(
@@ -1176,7 +1201,7 @@ export async function POST(request: NextRequest) {
     // Check Supabase status
     const enhancedLogs = await enhanceCallLogsWithSupabaseStatus(targetLogs);
     const missingTranscriptions = enhancedLogs.filter(
-      (log) => !log.existsInSupabase && log.recording_location && isValidRecordingLocation(log.recording_location)
+      (log) => !log.existsInSupabase && log.recording_location
     );
 
     let processedCount = 0;
@@ -1194,21 +1219,22 @@ export async function POST(request: NextRequest) {
       for (const log of missingTranscriptions) {
         try {
           console.log(`🔍 Final check for call ${log.contact_id}...`);
-          console.log(`📁 Recording location: ${log.recording_location}`);
 
-          // Double-check right before processing each individual call
+          // FIXED: Double-check right before processing each individual call
           const stillMissing = !(await checkCallExistsInSupabase(log.contact_id));
           if (!stillMissing) {
             console.log(`⏭️ Call ${log.contact_id} already processed, skipping...`);
             continue;
           }
 
-          // Mark call as being processed
+          // NEW: Mark call as being processed
           markCallAsProcessing(log.contact_id);
 
           console.log(`🎯 Processing call ${log.contact_id}...`);
 
-          const audioBuffer = await downloadAudioFromSftp(log.recording_location);
+          const audioBuffer = await downloadAudioFromSftp(
+            log.recording_location
+          );
           const uploadUrl = await uploadToAssemblyAI(audioBuffer, apiKey);
           const transcript = await transcribeAudio(uploadUrl, 2);
 
@@ -1233,7 +1259,7 @@ export async function POST(request: NextRequest) {
                 };
           }
 
-          // Final check before saving
+          // FIXED: Final check before saving
           const finalCheck = await checkCallExistsInSupabase(log.contact_id);
           if (finalCheck) {
             console.log(`⚠️ Call ${log.contact_id} was processed during processing, skipping save...`);
@@ -1245,19 +1271,18 @@ export async function POST(request: NextRequest) {
           log.existsInSupabase = true;
           processedCount++;
 
-          // Mark as successfully processed
+          // NEW: Mark as successfully processed
           unmarkCallAsProcessing(log.contact_id, true);
 
           console.log(`✅ Successfully processed call ${log.contact_id}`);
         } catch (error) {
           console.error(`❌ Error processing call ${log.contact_id}:`, error);
           
-          // Unmark as processing on error
+          // NEW: Unmark as processing on error
           unmarkCallAsProcessing(log.contact_id, false);
           
           errors.push({
             contact_id: log.contact_id,
-            recording_location: log.recording_location,
             error: error instanceof Error ? error.message : "Unknown error",
           });
         }
@@ -1267,7 +1292,7 @@ export async function POST(request: NextRequest) {
     // Get final status
     const finalEnhancedLogs = await enhanceCallLogsWithSupabaseStatus(enhancedLogs);
 
-    // Clear processing state on completion
+    // NEW: Clear processing state on completion
     clearProcessingState();
 
     return NextResponse.json({
@@ -1288,7 +1313,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error in POST workflow:", error);
     
-    // Clear processing state on error
+    // NEW: Clear processing state on error
     clearProcessingState();
     
     return NextResponse.json(
